@@ -1,0 +1,33 @@
+# ---- 构建产物 ----
+target/
+build/
+out/
+*.jar
+*.war
+*.class
+
+# ---- IDE ----
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+
+# ---- 日志与临时文件 ----
+*.log
+logs/
+.tmp/
+
+# ---- 本地数据库备份（内含真实数据，绝对不要提交）----
+.dbbackup/
+
+# ---- 与本项目无关的本机工具目录 ----
+atrust_repair/
+
+# ---- 操作系统 ----
+Thumbs.db
+.DS_Store
+desktop.ini

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>视频 · 直播系统</title>
+    <link rel="stylesheet" href="/css/bili.css">
+</head>
+<body>
+<div id="navRoot"></div>
+<div class="toasts" id="toasts"></div>
+
+<main class="wrap">
+
+    <!-- ================= 推荐视频 ================= -->
+    <section class="section">
+        <div class="section-head">
+            <h2>为你推荐</h2>
+            <span class="more" id="videoMore"></span>
+        </div>
+
+        <div class="card mb16" style="padding:14px 16px;">
+            <div class="row" style="flex-wrap:wrap;align-items:center;">
+                <button class="btn primary" id="reloadBtn" style="flex:0 0 auto;">换一批</button>
+                <a class="btn blue" href="/live.html" style="flex:0 0 auto;">去看直播间 →</a>
+                <span class="muted" style="flex:1;text-align:right;font-size:12.5px;" id="likeStat"></span>
+            </div>
+        </div>
+
+        <div class="grid" id="videoGrid">
+            <div class="loading" style="grid-column:1/-1;">加载中…</div>
+        </div>
+    </section>
+
+    <details class="log-wrap">
+        <summary><span>请求日志</span>
+            <span><button id="clearLog" class="btn link" type="button">清空</button></span>
+        </summary>
+        <pre id="logBox"></pre>
+    </details>
+
+</main>
+
+<script src="/js/common.js"></script>
+<script src="/js/home.js"></script>
+</body>
+</html>

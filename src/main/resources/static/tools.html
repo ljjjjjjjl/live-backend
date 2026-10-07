@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>工具台 · 直播系统</title>
+    <link rel="stylesheet" href="/css/bili.css">
+</head>
+<body>
+<div id="navRoot"></div>
+<div class="toasts" id="toasts"></div>
+
+<main class="wrap">
+
+    <div class="section-head"><h2>敏感词过滤（DFA）</h2>
+        <span class="more" id="wordCount">词库加载中…</span>
+    </div>
+    <div class="card">
+        <label class="field">
+            <span class="label">待检测文本</span>
+            <textarea id="swText" class="input" placeholder="例如：这是一条带 fxxk 的弹幕">这是一条正常的弹幕，试试输入 fuck 或 诈骗</textarea>
+        </label>
+        <div class="row mb16">
+            <button class="btn blue" id="swCheck">检测是否命中</button>
+            <button class="btn" id="swFilter">看过滤后的文本</button>
+            <button class="btn" id="swReload">重新加载词库（热更新）</button>
+        </div>
+        <div id="swResult" class="logbox" style="max-height:150px;">结果会显示在这里</div>
+        <p class="hint">DFA 前缀树一次遍历 O(n) 匹配；发弹幕时在 <code>DanmakuService.save</code> 里自动过滤。</p>
+    </div>
+
+    <div class="section-head mt16"><h2>计数缓存（Redis Hash）</h2>
+        <span class="more">/api/count/**</span>
+    </div>
+    <div class="card">
+        <div class="row" style="align-items:flex-end;">
+            <label class="field" style="margin-bottom:0;">
+                <span class="label">目标 ID（视频/直播间）</span>
+                <span class="input-wrap"><input id="cntTarget" class="input" type="number" value="111"></span>
+            </label>
+            <label class="field" style="margin-bottom:0;max-width:180px;">
+                <span class="label">计数类型</span>
+                <select id="cntType" class="input">
+                    <option value="like">like</option>
+                    <option value="favorite">favorite</option>
+                    <option value="forward">forward</option>
+                </select>
+            </label>
+            <button class="btn primary" id="cntIncr" style="flex:0 0 auto;">+1</button>
+            <button class="btn" id="cntRead" style="flex:0 0 auto;">读取全部</button>
+        </div>
+        <p class="hint">这是早期的演示接口（<b>无鉴权、无判重</b>），正式点赞走 <code>/api/video/{id}/like</code>。</p>
+        <div id="cntResult" class="logbox" style="max-height:130px;">结果会显示在这里</div>
+    </div>
+
+    <div class="section-head mt16"><h2>视频点赞状态</h2>
+        <span class="more">/api/video/**（需登录）</span>
+    </div>
+    <div class="card">
+        <div class="row" style="align-items:flex-end;">
+            <label class="field" style="margin-bottom:0;">
+                <span class="label">视频 ID</span>
+                <span class="input-wrap"><input id="likeVideoId" class="input" type="number" value="111"></span>
+            </label>
+            <button class="btn blue" id="likeStatus" style="flex:0 0 auto;">查状态 + 赞数</button>
+            <button class="btn" id="likeMine" style="flex:0 0 auto;">我赞过的 ID 列表</button>
+            <a class="btn" href="/like.html" style="flex:0 0 auto;">并发压测页 →</a>
+        </div>
+        <div id="likeResult" class="logbox" style="max-height:130px;">结果会显示在这里</div>
+    </div>
+
+    <div class="section-head mt16"><h2>数据库现状</h2>
+        <span class="more">静态展示</span>
+    </div>
+    <div class="card">
+        <div class="grid-6" id="statGrid"></div>
+    </div>
+
+    <details class="log-wrap" open>
+        <summary><span>请求日志</span>
+            <span><button id="clearLog" class="btn link" type="button">清空</button></span>
+        </summary>
+        <pre id="logBox"></pre>
+    </details>
+
+</main>
+
+<script src="/js/common.js"></script>
+<script src="/js/tools.js"></script>
+</body>
+</html>

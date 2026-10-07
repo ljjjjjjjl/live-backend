@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 · 直播系统</title>
+    <link rel="stylesheet" href="/css/bili.css">
+</head>
+<body>
+<div id="navRoot"></div>
+<div class="toasts" id="toasts"></div>
+
+<main class="wrap-narrow">
+
+    <!-- ============ 已登录：会话卡片 ============ -->
+    <section id="sessionCard" class="card hidden">
+        <div class="flex gap12 mb16">
+            <div class="bili-avatar" id="avatar" style="width:52px;height:52px;font-size:20px;">U</div>
+            <div style="flex:1;min-width:0;">
+                <div style="font-size:16px;font-weight:700;" id="sName">-</div>
+                <div class="muted" style="font-size:12.5px;" id="sMeta">-</div>
+            </div>
+            <span class="pill green">已登录</span>
+        </div>
+
+        <div class="row mb16">
+            <button class="btn primary" id="goHome">进入首页</button>
+            <button class="btn" id="logoutBtn">退出登录</button>
+        </div>
+
+        <!-- 绑定手机号 -->
+        <div style="border-top:1px solid var(--line);padding-top:16px;">
+            <div class="flex" style="justify-content:space-between;margin-bottom:6px;">
+                <strong style="font-size:14px;">绑定手机号</strong>
+                <span class="pill">写入 user 表</span>
+            </div>
+            <p class="hint" style="margin-bottom:12px;">验证码一次性使用，绑定请重新获取。</p>
+            <label class="field">
+                <span class="label">手机号</span>
+                <span class="input-wrap">
+                    <input id="bindPhone" type="text" placeholder="11 位手机号" maxlength="11" inputmode="numeric">
+                </span>
+            </label>
+            <label class="field">
+                <span class="label">验证码</span>
+                <span class="input-wrap">
+                    <input id="bindCode" type="text" placeholder="6 位验证码" maxlength="6" inputmode="numeric">
+                    <button type="button" id="bindSendBtn" class="btn inline">获取验证码</button>
+                </span>
+            </label>
+            <button id="bindBtn" class="btn blue block" type="button">绑 定</button>
+        </div>
+
+        <details class="log-wrap">
+            <summary><span>JWT Token</span>
+                <span><button id="copyTokenBtn" class="btn link" type="button">复制</button></span>
+            </summary>
+            <div class="logbox" style="font-size:11px;word-break:break-all;" id="tokenText">-</div>
+        </details>
+    </section>
+
+    <!-- ============ 未登录：登录 / 注册 ============ -->
+    <section id="authCard" class="card">
+        <div class="center mb16">
+            <div style="font-size:20px;font-weight:700;">欢迎回来</div>
+            <div class="muted" style="font-size:13px;margin-top:4px;">账号密码 · 手机号验证码 · JWT 鉴权</div>
+        </div>
+
+        <div class="segmented" role="tablist">
+            <span class="seg-thumb" id="segThumb"></span>
+            <button class="seg active" data-tab="pwd" type="button">账号密码</button>
+            <button class="seg" data-tab="sms" type="button">手机号验证码</button>
+        </div>
+
+        <!-- 账号密码登录 -->
+        <form id="pwdForm" class="panel active" autocomplete="off" novalidate>
+            <label class="field">
+                <span class="label">用户名</span>
+                <span class="input-wrap"><input id="pwdUsername" type="text" placeholder="请输入用户名" autocomplete="username"></span>
+            </label>
+            <label class="field">
+                <span class="label">密码</span>
+                <span class="input-wrap"><input id="pwdPassword" type="password" placeholder="请输入密码" autocomplete="current-password"></span>
+            </label>
+            <button type="submit" class="btn primary block" id="pwdSubmit">登 录</button>
+            <button type="button" id="toggleRegister" class="btn link block mt8">还没有账号？去注册</button>
+        </form>
+
+        <!-- 注册 -->
+        <form id="regForm" class="panel" autocomplete="off" novalidate>
+            <label class="field">
+                <span class="label">用户名</span>
+                <span class="input-wrap"><input id="regUsername" type="text" placeholder="登录用户名（唯一）"></span>
+            </label>
+            <label class="field">
+                <span class="label">密码</span>
+                <span class="input-wrap"><input id="regPassword" type="password" placeholder="请输入密码"></span>
+            </label>
+            <label class="field">
+                <span class="label">昵称</span>
+                <span class="input-wrap"><input id="regName" type="text" placeholder="显示昵称（注册必填）"></span>
+            </label>
+            <button type="submit" class="btn primary block" id="regSubmit">注 册</button>
+            <button type="button" id="cancelRegister" class="btn link block mt8">返回登录</button>
+        </form>
+
+        <!-- 手机号验证码登录 -->
+        <form id="smsForm" class="panel" autocomplete="off" novalidate>
+            <label class="field">
+                <span class="label">手机号</span>
+                <span class="input-wrap"><input id="smsPhone" type="text" placeholder="11 位手机号，如 13812345678" maxlength="11" inputmode="numeric"></span>
+            </label>
+            <label class="field">
+                <span class="label">验证码</span>
+                <span class="input-wrap">
+                    <input id="smsCode" type="text" placeholder="6 位验证码" maxlength="6" inputmode="numeric">
+                    <button type="button" id="sendCodeBtn" class="btn inline">获取验证码</button>
+                </span>
+            </label>
+            <button type="submit" class="btn primary block" id="smsSubmit">登录 / 注册</button>
+            <p class="hint">首次使用该手机号登录会自动创建账号（登录即注册）</p>
+        </form>
+    </section>
+
+    <details class="log-wrap">
+        <summary><span>请求日志</span>
+            <span><button id="clearLog" class="btn link" type="button">清空</button></span>
+        </summary>
+        <pre id="logBox"></pre>
+    </details>
+
+</main>
+
+<script src="/js/common.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>

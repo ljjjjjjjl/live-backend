@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>点赞并发压测 · 直播系统</title>
+    <link rel="stylesheet" href="/css/bili.css">
+</head>
+<body>
+<div id="navRoot"></div>
+<div class="toasts" id="toasts"></div>
+
+<main class="wrap">
+
+    <div class="section-head">
+        <h2>视频点赞 · 并发幂等压测</h2>
+        <span class="more" id="whoAmI"></span>
+    </div>
+
+    <div class="card mb16">
+        <p style="margin:0 0 12px;font-size:13px;color:var(--text-2);">
+            对<b>同一个视频</b>同时发出 10 个点赞请求，验证数据库唯一索引
+            <code>uk_user_video</code> 是否真的挡住重复插入 —— <b>计数应该只 +1</b>。
+        </p>
+        <div class="row" style="flex-wrap:wrap;">
+            <button class="btn primary" id="loadBtn" style="flex:0 0 auto;">加载推荐视频</button>
+            <button class="btn blue" id="stressBtn" style="flex:0 0 auto;">并发点赞压测 ×10</button>
+            <button class="btn" id="clearLog" style="flex:0 0 auto;">清空日志</button>
+        </div>
+    </div>
+
+    <div class="grid" id="list">
+        <div class="empty" style="grid-column:1/-1;"><span class="big">👍</span>点「加载推荐视频」开始</div>
+    </div>
+
+    <details class="log-wrap" open>
+        <summary><span>请求日志</span><span class="muted" style="font-size:12px;">并发结果看这里</span></summary>
+        <pre id="logBox"></pre>
+    </details>
+
+</main>
+
+<script src="/js/common.js"></script>
+<script src="/js/like.js"></script>
+</body>
+</html>

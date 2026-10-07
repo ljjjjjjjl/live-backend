@@ -1,0 +1,105 @@
+# 服务器端口
+server:
+  port: 8080
+
+spring:
+  # 数据源：数据库名 = db1（表已建在 db1 库下）
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/db1?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: root
+    password: 123456
+    # ⭐ Hikari 连接池显式配置（2026-09-14 补）
+    # 不显式配的话，Spring Boot 默认 maximum-pool-size=10 —— 点赞这种高并发短事务一上来就排队；
+    # 再叠加"事务里调 Redis、Redis 抖 3s 就白占连接 3s"，10 个连接瞬间耗尽 → 雪崩。
+    # （代码侧已把 Redis 移出事务，见 VideoLikeService 类注释「四、事务边界」；这里是把池子本身配合理）
+    hikari:
+      pool-name: LiveHikariPool
+      maximum-pool-size: 20            # 池上限：按"DB 扛得住的并发连接数"定，不是越大越好（每个连接都占 DB 线程/内存）
+      minimum-idle: 10                 # 常驻空闲连接：避免流量突增时现建连接（建连接要 TCP + 认证握手）
+      connection-timeout: 3000         # 拿不到连接最多等 3s（默认 30s：故障时请求会长时间挂住，体验更差）
+      idle-timeout: 600000             # 空闲 10 分钟回收多余连接
+      max-lifetime: 1800000            # 连接最长活 30 分钟；必须小于 MySQL 的 wait_timeout，避免拿到被服务端单方面断掉的连接
+      leak-detection-threshold: 10000  # 连接被借走超过 10s 就打告警日志——专门用来抓"事务里干慢活（如调 Redis）"这类问题
+      # validation-timeout: 3000      # 连接可用性校验超时；Connector/J 8 走 JDBC4 isValid，无需再配 connection-test-query
+
+  # Redis 配置（第 3 周：在线人数/礼物榜/计数缓存）
+  # 本机 Redis 已启动，默认端口 6379、无密码。生产用环境变量注入，别写死在代码里。
+  #
+  # ⚠️ 服务端内存策略必须配 allkeys-lru（写进 redis.conf 或 CONFIG SET，不是 Spring 配置项）：
+  #    点赞计数 key（video:like:count:{id}）现在是【永不过期】的 —— 设 TTL 会让"热 key 被不断续期
+  #    永不过期、算错不自愈，冷 key 过期又缓存击穿"（详见 VideoLikeService 里的注释）。
+  #    既然不设 TTL，就得靠淘汰策略兜底内存：
+  #      maxmemory 256mb
+  #      maxmemory-policy allkeys-lru      # 不能用 volatile-lru：它只淘汰带 TTL 的 key，而这些 key 恰恰没有 TTL
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      # password:          # 有密码就填
+      # database: 0        # 默认 0 号库
+      timeout: 3000ms       # 连接/读写超时
+      lettuce:
+        pool:
+          max-active: 8     # 连接池最大连接数
+          max-idle: 8
+          min-idle: 0
+
+mybatis-plus:
+  configuration:
+    # 数据库下划线字段 自动映射为 驼峰属性（如 create_time -> createTime）
+    map-underscore-to-camel-case: true
+    # SQL 日志：用 Slf4jImpl，不用 StdOutImpl
+    #   ① StdOutImpl 是直接 System.out 打印、**完全不看日志级别**，没法单独关掉某张表；
+    #      而敏感词是启动时【全量】加载的，28 行还好，真实词库几万行会把启动日志整个刷掉；
+    #   ② 词库本身就是内容审核策略，明文打进日志等于把规则泄出去。
+    #   换成 Slf4jImpl 后，MyBatis 的 logger 名 = Mapper 接口全限定名，
+    #   于是可以在下面 logging.level 里【按 Mapper 单独设级别】——数据照样加载，只是不打印。
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
+  global-config:
+    db-config:
+      id-type: auto
+
+# 日志级别
+logging:
+  level:
+    # MyBatis 的 SQL 日志走 Mapper 全限定名（如 com.live.mapper.VideoMapper）
+    com.live.mapper: debug                     # 其它 Mapper 的 SQL 照旧打印（原来 StdOutImpl 的效果）
+    com.live.mapper.SensitiveWordMapper: warn  # 敏感词全量加载不打行日志（⚠️ 只是不打印，词库照常加载）
+
+# JWT 配置
+jwt:
+  # 签名密钥（HS256 要求至少 32 字节，这里给一个足够长的字符串；生产要用环境变量，别写死在代码里）
+  secret: live-backend-jwt-secret-key-please-change-in-production-0123456789
+  # 单次 Token 有效期（毫秒）。这里 2 小时。
+  # 注意：JWT 的 exp 在签发时就写进了 Token 内部并被签名保护，服务端**改不了已签发的 Token**，
+  # 所以"活跃期间自动续期"只能靠"换发新 Token"实现 —— 见下面 refresh-threshold。
+  expire: 7200000
+
+  # 滑动续期阈值（毫秒）：Token 剩余有效期 ≤ 该值时，服务端自动签发一个新 Token，
+  # 通过响应头 X-Refresh-Token 下发给前端替换旧的 → 只要用户持续活跃，登录态就一直"滚"下去。
+  # 设为 0 表示关闭滑动续期，退回"固定 2 小时后必掉线"。
+  # 这里 1 小时（= expire 的一半）：用到一半就开始续，留足容错空间。
+  refresh-threshold: 3600000
+
+  # 会话绝对上限（毫秒）：从【首次登录】算起，续期后的 Token 若会超出这个时长就不再续期，
+  # 强制用户重新登录。防止"挂着页面不断点 → 会话永远不结束"。
+  # 这里 12 小时；设为 0 表示不限制（不推荐）。
+  max-lifetime: 43200000
+
+# 应用自定义配置
+app:
+  sms:
+    # 开发环境：在 /api/auth/sms/send 响应里回显 Mock 验证码，方便测试。
+    # ⚠️ 生产环境必须设为 false，否则任何人都能从接口响应里直接拿到验证码。
+    expose-mock-code: true
+
+  # 视频点赞相关（第 4 周：权威同步写 + 派生态异步刷回）
+  like:
+    # 对账开关。开启后由 LikeCountReconcileTask 定时把 video.like_count 校正为
+    # 权威表 user_like 的真实计数。MQ 未接入期间，这是保证数据最终一致的兜底手段。
+    reconcile-enabled: true
+    # 对账间隔（毫秒）：300000 = 5 分钟一轮
+    reconcile-interval: 300000
+    # 应用启动后延迟多久跑第一次（毫秒）：60000 = 1 分钟，避开启动期资源竞争
+    reconcile-initial-delay: 60000

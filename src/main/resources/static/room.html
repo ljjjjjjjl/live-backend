@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>直播间 · 直播系统</title>
+    <link rel="stylesheet" href="/css/bili.css">
+    <style>
+        .room-layout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 16px; align-items: start; }
+        @media (max-width: 940px) { .room-layout { grid-template-columns: 1fr; } }
+
+        .player {
+            aspect-ratio: 16 / 9; border-radius: var(--radius);
+            background: radial-gradient(circle at 50% 40%, #2A2E38, #14161B 70%);
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            color: #6E7686; gap: 8px; position: relative; overflow: hidden;
+        }
+        .player .big { font-size: 42px; }
+        .player .txt { font-size: 13px; }
+        .player .live-dot {
+            position: absolute; top: 12px; left: 12px;
+            background: var(--bili-pink); color: #fff; font-size: 12px;
+            padding: 3px 10px; border-radius: 4px; font-weight: 600;
+            display: flex; align-items: center; gap: 5px;
+        }
+        .player .live-dot::before {
+            content: ''; width: 6px; height: 6px; border-radius: 50%; background: #fff;
+            animation: blink 1.2s infinite;
+        }
+
+        .room-title { font-size: 17px; font-weight: 700; margin: 12px 0 8px; }
+        .room-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+
+        .chat-card {
+            background: #fff; border-radius: var(--radius); box-shadow: var(--shadow);
+            display: flex; flex-direction: column; height: 430px; overflow: hidden;
+        }
+        .chat-head {
+            padding: 9px 14px; border-bottom: 1px solid var(--line);
+            font-size: 13px; color: var(--text-2); display: flex;
+            justify-content: space-between; align-items: center;
+        }
+        .chat-input { border-top: 1px solid var(--line); padding: 10px; display: flex; gap: 8px; align-items: center; }
+        .chat-input input[type=text] { flex: 1; }
+        .chat-input input[type=color] {
+            width: 34px; height: 34px; padding: 2px; border: 1px solid var(--line);
+            border-radius: var(--radius-s); background: #fff; cursor: pointer; flex: 0 0 auto;
+        }
+
+        .rank-item {
+            display: flex; align-items: center; gap: 10px;
+            padding: 7px 0; border-bottom: 1px dashed var(--line-2); font-size: 13px;
+        }
+        .rank-item:last-child { border-bottom: none; }
+        .rank-no {
+            width: 20px; height: 20px; border-radius: 5px; flex: 0 0 auto;
+            background: var(--line-2); color: var(--text-3);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 11px; font-weight: 700;
+        }
+        .rank-no.top1 { background: #FFD700; color: #7A5C00; }
+        .rank-no.top2 { background: #D8DCE3; color: #4A5060; }
+        .rank-no.top3 { background: #E8B98B; color: #6B4423; }
+        .rank-item .val { margin-left: auto; color: var(--bili-pink); font-weight: 700; }
+    </style>
+</head>
+<body>
+<div id="navRoot"></div>
+<div class="toasts" id="toasts"></div>
+
+<main class="wrap">
+    <div class="room-layout">
+
+        <!-- ==================== 左侧：播放器 + 弹幕 ==================== -->
+        <div>
+            <div class="player">
+                <span class="live-dot" id="liveDot">直播中</span>
+                <span class="big">📺</span>
+                <span class="txt" id="playerTxt">直播间画面占位</span>
+            </div>
+
+            <div class="room-title" id="roomTitle">加载中…</div>
+            <div class="room-meta">
+                <span class="pill blue" id="roomIdPill">roomId -</span>
+                <span class="pill" id="roomCatePill">-</span>
+                <span class="pill green" id="onlinePill">在线 -</span>
+                <span class="pill pink" id="scorePill">热度 -</span>
+                <span class="pill" id="wsPill">弹幕未连接</span>
+            </div>
+
+            <div class="chat-card">
+                <div class="chat-head">
+                    <span>弹幕</span>
+                    <span class="muted" style="font-size:12px;" id="dmStat">-</span>
+                </div>
+                <div class="dm-list" id="dmList"></div>
+                <div class="chat-input">
+                    <input type="color" id="dmColor" value="#FB7299" title="弹幕颜色">
+                    <input type="text" id="dmInput" class="input" placeholder="发个弹幕吧～（会经过 DFA 敏感词过滤）" maxlength="200">
+                    <button class="btn primary" id="sendDmBtn">发送</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== 右侧：互动 ==================== -->
+        <aside>
+            <!-- 在线 -->
+            <div class="card" style="padding:16px;">
+                <div class="flex" style="justify-content:space-between;margin-bottom:10px;">
+                    <strong style="font-size:14px;">在线人数</strong>
+                    <span class="pill green" id="onlinePill2">-</span>
+                </div>
+                <div class="row">
+                    <button class="btn blue" id="enterBtn">进入直播间</button>
+                    <button class="btn" id="leaveBtn">离开</button>
+                </div>
+                <p class="hint">Redis Set 维护在线集合（SADD/SREM/SCARD）</p>
+            </div>
+
+            <!-- 人气（直播间点赞） -->
+            <div class="card" style="padding:16px;">
+                <div class="flex" style="justify-content:space-between;margin-bottom:10px;">
+                    <strong style="font-size:14px;">人气</strong>
+                    <span class="pill" id="likePill">-</span>
+                </div>
+                <button class="btn primary block" id="likeBtn">👍 点赞（可连点）</button>
+                <p class="hint">Redis INCRBY 累加 + Lua 限速；前端本地攒批，每 500ms 上报一次</p>
+            </div>
+
+            <!-- 礼物榜 -->
+            <div class="card" style="padding:16px;">
+                <div class="flex" style="justify-content:space-between;margin-bottom:8px;">
+                    <strong style="font-size:14px;">礼物榜 Top10</strong>
+                    <button class="btn link" id="refreshRank">刷新</button>
+                </div>
+                <div id="rankList"><div class="muted" style="font-size:13px;">暂无数据</div></div>
+                <p class="hint">Redis ZSet：ZINCRBY 累加 + ZREVRANGE 取 TopN</p>
+            </div>
+
+            <!-- 送礼 -->
+            <div class="card" style="padding:16px;">
+                <strong style="font-size:14px;">送礼物</strong>
+                <label class="field mt8">
+                    <span class="label">收礼者（= 本房间主播，服务端校验）</span>
+                    <span class="input-wrap"><input id="giftReceiver" class="input" type="number" readonly></span>
+                </label>
+                <label class="field">
+                    <span class="label">礼物价值</span>
+                    <select id="giftValue" class="input">
+                        <option value="10">小心心 · 10</option>
+                        <option value="100" selected>辣条 · 100</option>
+                        <option value="500">小花花 · 500</option>
+                        <option value="2000">火箭 · 2000</option>
+                    </select>
+                </label>
+                <button class="btn primary block" id="giftBtn">送出礼物</button>
+                <p class="hint" id="giftHint">未登录时不可送礼</p>
+            </div>
+        </aside>
+    </div>
+
+    <details class="log-wrap">
+        <summary><span>请求日志</span>
+            <span><button id="clearLog" class="btn link" type="button">清空</button></span>
+        </summary>
+        <pre id="logBox"></pre>
+    </details>
+</main>
+
+<script src="/js/common.js"></script>
+<script src="/js/room.js"></script>
+</body>
+</html>

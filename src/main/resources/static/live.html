@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>直播间 · 直播系统</title>
+    <link rel="stylesheet" href="/css/bili.css">
+</head>
+<body>
+<div id="navRoot"></div>
+<div class="toasts" id="toasts"></div>
+
+<main class="wrap">
+
+    <!-- ================= 我的直播间（登录后显示） ================= -->
+    <section class="section hidden" id="myRoomSection">
+        <div class="section-head">
+            <h2>我的直播间</h2>
+            <span class="more" id="myRoomHint"></span>
+        </div>
+        <div class="card">
+            <!-- 未创建：创建表单 -->
+            <div id="createBox">
+                <div class="row" style="align-items:flex-end;">
+                    <label class="field" style="margin-bottom:0;">
+                        <span class="label">直播标题</span>
+                        <span class="input-wrap"><input id="newTitle" type="text" placeholder="例如：深夜一起打王者" maxlength="100"></span>
+                    </label>
+                    <label class="field" style="margin-bottom:0;max-width:170px;">
+                        <span class="label">分区</span>
+                        <select id="newCategory" class="input"></select>
+                    </label>
+                    <label class="field" style="margin-bottom:0;">
+                        <span class="label">标签（可选，逗号分隔）</span>
+                        <span class="input-wrap"><input id="newTags" type="text" placeholder="王者荣耀,教学"></span>
+                    </label>
+                    <button class="btn primary" id="createRoomBtn" style="flex:0 0 auto;">创建并开播</button>
+                </div>
+                <p class="hint">一个主播同时只能有一个直播中的直播间；再次创建会自动关掉旧的。</p>
+            </div>
+
+            <!-- 已创建：管理面板 -->
+            <div id="manageBox" class="hidden">
+                <div class="flex gap12 mb16" style="flex-wrap:wrap;">
+                    <span class="pill blue" id="myRoomId">-</span>
+                    <span id="myRoomState" class="pill">-</span>
+                    <span class="muted" id="myRoomTitle" style="font-size:13px;"></span>
+                    <div style="flex:1;"></div>
+                    <button class="btn" id="startBtn">开播</button>
+                    <button class="btn" id="stopBtn">关播</button>
+                    <a class="btn primary" id="enterMyRoom">进入我的直播间</a>
+                    <button class="btn link" id="forgetRoomBtn">忘记这个房间</button>
+                </div>
+                <p class="hint">「忘记」只清本地记录，数据库里的直播间还在。</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- ================= 推荐直播间 ================= -->
+    <section class="section">
+        <div class="section-head">
+            <h2>推荐直播间</h2>
+            <span class="more" id="roomMore"></span>
+        </div>
+        <div class="card mb16" style="padding:13px 16px;">
+            <div class="row" style="flex-wrap:wrap;align-items:center;">
+                <button class="btn primary" id="reloadRecommend" style="flex:0 0 auto;">换一批</button>
+                <a class="btn blue" href="/home.html" style="flex:0 0 auto;">去看视频 →</a>
+                <span class="muted" style="flex:1;text-align:right;font-size:12.5px;" id="roomStat"></span>
+            </div>
+        </div>
+        <div class="grid-6" id="roomGrid">
+            <div class="loading" style="grid-column:1/-1;">加载中…</div>
+        </div>
+    </section>
+
+    <!-- ================= 全部直播间（分区 + 分页） ================= -->
+    <section class="section" id="live">
+        <div class="section-head">
+            <h2>全部直播间</h2>
+            <span class="more" id="listStat"></span>
+        </div>
+        <!-- 分区筛选：只作用于本区，就在列表正上方，点了立刻能看见效果 -->
+        <div class="tabs" id="cateTabs"></div>
+        <div class="grid-6" id="liveGrid">
+            <div class="loading" style="grid-column:1/-1;">加载中…</div>
+        </div>
+        <div class="pager">
+            <button class="btn small" id="prevPage">上一页</button>
+            <span class="info" id="pageInfo">-</span>
+            <button class="btn small" id="nextPage">下一页</button>
+        </div>
+    </section>
+
+    <details class="log-wrap">
+        <summary><span>请求日志</span>
+            <span><button id="clearLog" class="btn link" type="button">清空</button></span>
+        </summary>
+        <pre id="logBox"></pre>
+    </details>
+
+</main>
+
+<script src="/js/common.js"></script>
+<script src="/js/live.js"></script>
+</body>
+</html>

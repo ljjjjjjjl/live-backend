@@ -107,7 +107,26 @@ Redis 读写与异步投递全部放在**事务提交之后**：
 数据库回滚不会多加一个赞，Redis 抖动也不会白占着数据库连接。
 （用编程式事务而不是拆 Bean，是为了绕开「同类自调用不走代理、`@Transactional` 失效」的坑。）
 
-### 4. 索引优化：EXPLAIN 驱动，实测 189ms → 0.24ms
+### 4. 对账：两级设计（脏集合 + 全量兜底）
+
+`video.like_count` 是派生列，靠对账和权威表 `user_like` 保持一致。全表对账会随数据量线性变差
+（`user_like` 上亿后每轮全表聚合，会冲掉 buffer pool），所以改成两级：
+
+```
+点赞/取消点赞 ──► SADD like:dirty:video {videoId}      ← 谁改谁标记，Set 天然去重
+                        │  每 30 秒
+                        ▼
+        ① 脏集合对账（主力）SPOP 一批(默认 1000) → 只查这批 videoId 的真实赞数 → 只改对不上的行
+                        │
+                        ▼
+        ② 全量对账（兜底）每天凌晨 3 点跑一遍 —— Redis 丢了脏集合也不会永久漏修
+```
+
+四个刻意的设计点：**Set 去重**（同一视频点 1 万次只留一个成员）、**用 `SPOP` 而不是 `SMEMBERS`+`SREM`**
+（原子弹出，不会"取了还没删就崩"）、**限批**（避免对账自己攒成大事务）、
+**`SPOP` 放在事务外**（事务回滚不会把弹出的 videoId 弄丢）。
+
+### 5. 索引优化：EXPLAIN 驱动，实测 189ms → 0.24ms
 
 热度排序原本是 `possible_keys = NULL` + `Using filesort`。新增两个索引：
 
@@ -223,7 +242,7 @@ src/main/resources/
 
 - **不碰音视频**：视频采集与推流由前端负责（`getUserMedia` / OBS / SRS），后端只做**直播间状态 + 实时文字互动**。
 - **MQ 未接入**：点赞的异步刷回只留了 `LikeCountPublisher` 接口 + `NoopLikeCountPublisher` 空实现，
-  `video.like_count` 目前完全靠**定时对账任务**兜底（默认 5 分钟一轮）。
+  `video.like_count` 目前完全靠**两级对账**兜底（脏集合 30 秒一轮 + 每天凌晨全量兜底，见「核心设计 §4」）。
 - **收藏 / 转发 / 评论**：表已建，功能未实现（设计储备）。
 - **礼物榜只在 Redis**：`gift:rank:{roomId}` 未落库，Redis 淘汰即永久丢失；方案是补礼物流水表 + 异步落库。
 - **`live_room.online_count` 是静态列**：真值在 Redis，该列仅用于排序兜底，未接实时刷回。

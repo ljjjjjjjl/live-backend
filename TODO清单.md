@@ -54,8 +54,19 @@
       `leak-detection-threshold: 10000`（专抓"事务里干慢活"，就是这一类的回归防线）
 
 ### P1 · 对账改造与索引
-- [ ] **对账任务改"脏集合"对账** —— 现在是 `user_like` 全表 `GROUP BY`（`VideoMapper.reconcileLikeCount`），
-      上量后每 5 分钟扫全表。改成点赞时 `SADD like:dirty:video`，对账只处理脏的
+- [x] **对账任务改"脏集合"对账** ✅ **已完成（2026-10-07）** —— 原来是 `user_like` 全表 `GROUP BY`
+      （`VideoMapper.reconcileLikeCount`）每 5 分钟扫一次全表，上量后是灾难。
+      现在改成**两级对账**：
+      - **① 脏集合（主力，30 秒一轮）**：点赞/取消点赞时 `SADD like:dirty:video {videoId}`，
+        对账用 `SPOP` 弹一批（`dirty-batch-size`，默认 1000）做**定点修正** ——
+        只查这批 videoId 的真实赞数（`WHERE video_id IN (...)` 走 `idx_video` 范围扫描），
+        用 Java 比对后只更新对不上的行
+      - **② 全量对账（兜底，每天凌晨 3 点）**：脏集合在 Redis 里，重启/flush 就丢了，
+        那些"脏了但标记丢了"的视频只有全量对账能兜住 —— 两级是互补，不是替代
+      - 实现：`service/LikeReconcileService`（`markDirty` / `reconcileDirty` / `reconcileAll`）
+        + `task/LikeCountReconcileTask`（两个 `@Scheduled`）+ `VideoMapper` 两个新方法
+      - **实测**：把 `like_count` 人为改成 999 → 取消点赞标脏 → 30 秒内自动修正为真实值（`Updates:1`）；
+        塞 1200 个脏 id → 一轮只处理 1000、剩 200 下轮继续（**限批生效**）
 - [x] **两个索引 DDL** ✅ **已完成（2026-10-07）** —— 脚本：`src/main/resources/sql/video_index.sql`
       `video` 新增 `idx_heat`（热度表达式函数索引）+ `idx_category_play(category, play_count DESC)`。
       30 万行合成表实测：热度排序 **189ms → 0.24ms**（≈780×，走 `Index scan using idx_heat (reverse)`）；

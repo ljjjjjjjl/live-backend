@@ -150,6 +150,13 @@ public class VideoLikeService {
     @Autowired
     private TransactionTemplate transactionTemplate;
 
+    /**
+     * 对账服务：权威表一变就 {@code SADD like:dirty:video} 标脏，
+     * 由 {@code LikeCountReconcileTask} 定期把这批脏视频的 {@code video.like_count} 校正回来。
+     */
+    @Autowired
+    private LikeReconcileService likeReconcileService;
+
     /* ==================================================================
        点赞 / 取消点赞
        ================================================================== */
@@ -187,9 +194,12 @@ public class VideoLikeService {
         // ④ 只有真正新增才 +1 —— 这是"不重复计数"的关键。
         //    ⚠️ 事务已提交，这里才动 Redis / MQ：DB 若回滚就不会多加一个赞，
         //       而 Redis 的网络抖动也不会占着数据库连接。
+        //    ⑤ 顺手把 videoId 标进"脏集合"：派生列 video.like_count 现在肯定和权威表对不上了，
+        //       交给 LikeCountReconcileTask 定点修正（不用再全表扫）。
         if (Boolean.TRUE.equals(inserted)) {
             applyDelta(videoId, 1L);
             likeCountPublisher.publishVideoLikeDelta(videoId, 1L);
+            likeReconcileService.markDirty(videoId);
         }
 
         return new LikeResultVO(true, getLikeCount(videoId));   // 读 Redis，仍在事务外
@@ -243,6 +253,7 @@ public class VideoLikeService {
         if (deleted != null && deleted > 0) {
             applyDelta(videoId, -1L);
             likeCountPublisher.publishVideoLikeDelta(videoId, -1L);
+            likeReconcileService.markDirty(videoId);   // 派生列可能对不上了，标脏交给对账
         } else {
             log.debug("用户 {} 取消点赞视频 {} 时并无点赞记录，幂等返回", userId, videoId);
         }

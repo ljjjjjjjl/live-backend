@@ -96,10 +96,18 @@ app:
 
   # 视频点赞相关（第 4 周：权威同步写 + 派生态异步刷回）
   like:
-    # 对账开关。开启后由 LikeCountReconcileTask 定时把 video.like_count 校正为
+    # 对账开关。开启后由 LikeCountReconcileTask 把 video.like_count 校正为
     # 权威表 user_like 的真实计数。MQ 未接入期间，这是保证数据最终一致的兜底手段。
     reconcile-enabled: true
-    # 对账间隔（毫秒）：300000 = 5 分钟一轮
-    reconcile-interval: 300000
-    # 应用启动后延迟多久跑第一次（毫秒）：60000 = 1 分钟，避开启动期资源竞争
-    reconcile-initial-delay: 60000
+
+    # ── ① 脏集合对账（主力，2026-10-07 新增）─────────────────────────────
+    # 点赞/取消点赞时 SADD like:dirty:video {videoId}，这里定时 SPOP 一批做定点修正。
+    # 对比原来的"每 5 分钟全表 GROUP BY"：扫描量从"两张全表"降到"几十~几百个 videoId"。
+    dirty-reconcile-interval: 30000      # 30 秒一轮（fixedDelay：上一轮跑完再等 30s，不会重叠）
+    dirty-batch-size: 1000               # 每轮最多处理多少个脏 videoId（限批，剩下的下轮继续）
+
+    # ── ② 全量对账（兜底）──────────────────────────────────────────────
+    # 每天凌晨 3 点扫一遍全表。脏集合存在 Redis 里，重启/flush 就丢了，
+    # 那些"脏了但标记丢了"的视频只有这里能兜住 —— 所以两级都要，是互补不是替代。
+    # 正常情况一轮改 0 行（SQL 带 WHERE like_count <> 真值），所以低频跑得起。
+    full-reconcile-cron: "0 0 3 * * ?"

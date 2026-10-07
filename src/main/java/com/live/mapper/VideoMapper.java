@@ -3,6 +3,7 @@ package com.live.mapper;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.live.entity.Video;
 import com.live.vo.CategoryPreference;
+import com.live.vo.LikeCountPair;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
@@ -125,4 +126,45 @@ public interface VideoMapper extends BaseMapper<Video> {
             WHERE v.like_count <> IFNULL(t.c, 0)
             """)
     int reconcileLikeCount();
+
+    /* ==================================================================
+       脏集合对账（2026-10-07 新增）
+       ================================================================== */
+
+    /**
+     * 【脏集合对账 · 第一步】只查"这一批脏视频"的真实赞数。
+     *
+     * <p>和上面那条全量对账的关键区别：这里有 {@code WHERE video_id IN (...)}，
+     * 所以走 {@code idx_video} 的 <b>范围扫描</b>，只读这几十/几百个视频的索引区间；
+     * 而全量版是<b>把整张 user_like 聚合一遍</b>（数据量越大越慢，且会冲掉 buffer pool）。
+     *
+     * <p>返回的行是稀疏的：如果一个视频一个赞都没有，它不会出现在结果里，
+     * 调用方要用 {@code getOrDefault(id, 0L)} 兜住。
+     */
+    @Select("""
+            <script>
+            SELECT video_id, COUNT(*) AS cnt
+            FROM user_like
+            WHERE video_id IN
+            <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+            GROUP BY video_id
+            </script>
+            """)
+    List<LikeCountPair> selectRealLikeCounts(@Param("ids") List<Long> ids);
+
+    /**
+     * 【脏集合对账 · 第二步】把单个视频的计数改成真实值 —— <b>只改"对不上"的行</b>。
+     *
+     * <p>为什么逐条而不是批量：走的是主键等值更新（{@code WHERE id = ?}），单条成本极低；
+     * 而且稳态下调用方已经用 Java 比过差异，传进来的只有真正需要修的那几行，
+     * 通常一轮下来是 0~个位数。批量 UPDATE 反而要拼接大 SQL、锁更多行。
+     *
+     * <p>{@code AND like_count <> #{cnt}} 是幂等保护：值已经对了就影响 0 行（不写 binlog、不加锁）。
+     */
+    @Update("""
+            UPDATE video
+            SET like_count = #{cnt}
+            WHERE id = #{videoId} AND like_count <> #{cnt}
+            """)
+    int updateLikeCountIfDiff(@Param("videoId") Long videoId, @Param("cnt") Long cnt);
 }

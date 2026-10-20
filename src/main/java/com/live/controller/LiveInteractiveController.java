@@ -52,6 +52,9 @@ import java.util.Map;
 @RequestMapping("/api/live/{roomId}")
 public class LiveInteractiveController {
 
+    /** 单次送礼的价值上限（演示值）：防止一个客户端把榜单永久顶死，也防溢出 */
+    private static final double MAX_GIFT_VALUE = 1_000_000D;
+
     @Autowired
     private RedisRankService redisRankService;
 
@@ -121,9 +124,14 @@ public class LiveInteractiveController {
         if (receiverId != null && !receiverId.equals(anchorId)) {
             return Result.fail("收礼者不是本房间主播");
         }
-        // ③ 价值必须为正
-        if (value <= 0) {
-            return Result.fail("礼物价值必须大于 0");
+        // ③ 价值必须是有限正数：既要挡负数（把榜单刷下去），也要挡 NaN/Infinity
+        //    （double 的 NaN 和任何数比较都是 false，`value <= 0` 拦不住它；
+        //     而 Redis 的 ZINCRBY 收到 NaN 会直接报错，等于把一个客户端参数变成了服务端异常）
+        if (!Double.isFinite(value) || value <= 0) {
+            return Result.fail("礼物价值必须是大于 0 的有限数");
+        }
+        if (value > MAX_GIFT_VALUE) {
+            return Result.fail("礼物价值不能超过 " + (long) MAX_GIFT_VALUE);
         }
         // 生产：还要校验礼物是否存在、送礼者余额是否充足；并异步落库礼品流水表
         redisRankService.addGift(roomId, anchorId, value);
@@ -141,6 +149,21 @@ public class LiveInteractiveController {
     /** 进入直播间：在线人数 +1。userId 取 Token，不接受前端传参（否则能替别人刷在线） */
     @PostMapping("/enter")
     public Result<Void> enter(@PathVariable Long roomId, @RequestAttribute("userId") Long userId) {
+        redisRankService.online(roomId, userId);
+        return Result.ok(null);
+    }
+
+    /**
+     * 在线心跳：前端每 20 秒打一次，表示"我还在这间房里"。
+     *
+     * <p>为什么需要心跳？在线集合里的每个成员都带一个"最后活跃时间"，
+     * 超过 {@link RedisRankService#ONLINE_TTL_MS} 没有心跳就会被自动剔除。
+     * 这样即使客户端崩溃/断网/被强杀（根本发不出"离开"请求），在线人数也不会只增不减。
+     *
+     * <p>语义上它就是 {@code /enter}（幂等的 ZADD），单独开一个路径是为了让前端代码更直观。
+     */
+    @PostMapping("/heartbeat")
+    public Result<Void> heartbeat(@PathVariable Long roomId, @RequestAttribute("userId") Long userId) {
         redisRankService.online(roomId, userId);
         return Result.ok(null);
     }

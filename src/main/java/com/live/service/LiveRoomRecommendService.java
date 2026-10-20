@@ -10,8 +10,11 @@ import com.live.vo.LiveRoomVO;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -37,6 +40,12 @@ public class LiveRoomRecommendService {
     private static final int DEFAULT_SIZE = 20;
 
     /**
+     * "排除列表"最多带多少个 id（理由同 {@code RecommendService} 的 {@code MAX_EXCLUDE}：
+     * 排除是靠 SQL 的 {@code id NOT IN (...)} 实现的，列表长了会拖垮解析和传输）。
+     */
+    private static final int MAX_EXCLUDE = 200;
+
+    /**
      * 直播间推荐入口。
      * @param userId 当前用户，可为 null
      * @param size   要几条
@@ -49,10 +58,14 @@ public class LiveRoomRecommendService {
             return hotFallback(null, limit);
         }
 
-        // 1) 查用户看过哪些直播间（既是兴趣来源，也是要排除的"已看过"）
-        List<LiveUserWatch> watches = liveUserWatchMapper.selectList(
-                new LambdaQueryWrapper<LiveUserWatch>().eq(LiveUserWatch::getUserId, userId));
-        List<Long> watchedRoomIds = watches.stream().map(LiveUserWatch::getRoomId).collect(Collectors.toList());
+        // 1) 查用户最近看过的直播间（既是兴趣来源，也是要排除的"已看过"）
+        List<Long> watchedRoomIds = liveUserWatchMapper.selectList(
+                        new LambdaQueryWrapper<LiveUserWatch>()
+                                .select(LiveUserWatch::getRoomId)
+                                .eq(LiveUserWatch::getUserId, userId)
+                                .orderByDesc(LiveUserWatch::getCreateTime)
+                                .last("limit " + MAX_EXCLUDE))
+                .stream().map(LiveUserWatch::getRoomId).collect(Collectors.toList());
 
         // 2) 冷启动：一条没看过 → 全站热门兜底
         if (watchedRoomIds.isEmpty()) {
@@ -70,18 +83,23 @@ public class LiveRoomRecommendService {
         int perCategoryLimit = Math.max(1, limit / topCategories);
         List<LiveRoomVO> result = new java.util.ArrayList<>();
 
+        // ⚠️ exclude 同时包含"看过的"和"这轮已召回的"：否则第 5 步兜底补齐
+        //    会把第 4 步已经返回的直播间再查一遍，推荐流里出现重复卡片
+        Set<Long> exclude = new LinkedHashSet<>(watchedRoomIds);
+
         for (int i = 0; i < topCategories; i++) {
             String category = prefs.get(i).getCategory();
             List<LiveRoom> rooms = liveRoomMapper.selectByCategoryExcludeAndOrderByHot(
-                    category, watchedRoomIds, perCategoryLimit);
+                    category, new ArrayList<>(exclude), perCategoryLimit);
             for (LiveRoom r : rooms) {
                 result.add(LiveRoomVO.from(r, "与你常看的相似"));
+                exclude.add(r.getId());
             }
         }
 
         // 5) 不够则用全站热门直播间补齐
         if (result.size() < limit) {
-            List<LiveRoom> hot = liveRoomMapper.selectHotExclude(watchedRoomIds, limit - result.size());
+            List<LiveRoom> hot = liveRoomMapper.selectHotExclude(new ArrayList<>(exclude), limit - result.size());
             for (LiveRoom r : hot) {
                 result.add(LiveRoomVO.from(r, "热门"));
             }

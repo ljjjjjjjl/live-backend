@@ -8,9 +8,11 @@
      GET  /api/live/{roomId}/gift/rank?top=10     礼物榜（Redis ZSet）
      POST /api/live/{roomId}/enter               进入（在线+1，需 Token；身份取 Token）
      POST /api/live/{roomId}/leave               离开（在线-1，需 Token；身份取 Token）
+     POST /api/live/{roomId}/heartbeat           在线心跳（每 20s 一次；超过 60s 没心跳会被剔出在线集合）
      POST /api/live/{roomId}/gift?value=         送礼（需 Token；收礼者=本房间主播，服务端推导）
      GET  /api/danmaku?roomId=&pageNum=&pageSize= 历史弹幕
-     WS   /ws/danmaku/{roomId}?token=            实时弹幕（握手校验 Token）
+     POST /api/danmaku/ws-ticket                 换取 WS 握手用的一次性票据（60s，只能用一次）
+     WS   /ws/danmaku/{roomId}?ticket=           实时弹幕（票据换取，JWT 不再出现在 URL 里）
    ========================================================= */
 
 App.renderNav('live');
@@ -174,23 +176,46 @@ async function loadHistory() {
 }
 
 /* ==================== WebSocket ==================== */
-function connectWs() {
+let wsRetry = 0;             // 重连次数（指数退避用）
+let wsClosedByUs = false;    // 主动关闭时不要重连
+
+async function connectWs() {
     if (!App.isLogin()) {
         $('wsPill').textContent = '未登录 · 不能发弹幕';
         $('wsPill').className = 'pill';
-        pushDanmaku('未登录可以看历史弹幕，但连不上实时通道（握手需要 Token）', null, null, true);
+        pushDanmaku('未登录可以看历史弹幕，但连不上实时通道（握手需要身份）', null, null, true);
         return;
     }
 
     const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    const url = `${proto}${location.host}/ws/danmaku/${roomId}?token=${encodeURIComponent(App.token)}`;
+    const base = `${proto}${location.host}/ws/danmaku/${roomId}`;
+
+    // ⭐ 先用普通 HTTP（可以带 Authorization 头）换一张「60 秒、一次性」的握手票据，
+    //    再拿票据去连 WebSocket。
+    //    为什么不直接把 JWT 拼在 URL 上：URL 会进 access log / 代理日志 / Referer，
+    //    等于把有效期 2 小时的登录凭证撒到日志里；票据即使泄漏也已经作废了。
+    //    票据接口失败时（比如 Redis 抖动）回退到 ?token=，保证弹幕还能连上。
+    let url = `${base}?token=${encodeURIComponent(App.token)}`;
+    try {
+        const { data } = await App.api('/api/danmaku/ws-ticket',
+            { method: 'POST', auth: true, silent: true });
+        if (data.code === 0 && data.data && data.data.ticket) {
+            url = `${base}?ticket=${encodeURIComponent(data.data.ticket)}`;
+        } else {
+            App.log('取握手票据失败，回退到 ?token= ：' + (data.msg || ''), 'warn');
+        }
+    } catch (e) {
+        App.log('取握手票据异常，回退到 ?token=', 'err');
+    }
 
     ws = new WebSocket(url);
 
     ws.onopen = () => {
+        wsRetry = 0;
         $('wsPill').textContent = '弹幕已连接';
         $('wsPill').className = 'pill green';
-        App.log('WS 已连接 ' + url.replace(/token=.*/, 'token=***'), 'ok');
+        // 日志里把票据/Token 打码，别把凭证抄进页面日志
+        App.log('WS 已连接 ' + url.replace(/(ticket|token)=[^&]*/, '$1=***'), 'ok');
     };
 
     ws.onmessage = (evt) => {
@@ -202,15 +227,25 @@ function connectWs() {
             pushDanmaku(d.content, d.nickname, d.color, false);
         } else if (msg.type === 'SYSTEM') {
             pushDanmaku(msg.data, null, null, true);
-        } else if (msg.type === 'ONLINE') {
-            $('onlinePill').textContent = '在线 ' + msg.data;
-            $('onlinePill2').textContent = msg.data + ' 人';
         }
+        // 服务端目前只发 CHAT / SYSTEM，原来那个 ONLINE 分支永远不会命中（死代码），已删。
+        // 在线人数统一走 5 秒一次的 /online 轮询。
     };
 
     ws.onclose = () => {
         $('wsPill').textContent = '弹幕已断开';
         $('wsPill').className = 'pill';
+        if (wsClosedByUs || !App.isLogin()) return;
+
+        // ⭐ 自动重连（指数退避，最多 30 秒一次）：
+        //    原来的 onclose 只是把状态改成"已断开"就完了，网络抖一下、
+        //    服务端重启一次，弹幕就**永久失效**——用户还以为直播间没人说话。
+        wsRetry = Math.min(wsRetry + 1, 5);
+        const delay = Math.min(1000 * Math.pow(2, wsRetry - 1), 30000);
+        $('wsPill').textContent = `弹幕已断开 · ${Math.round(delay / 1000)}s 后重连`;
+        setTimeout(() => {
+            if (!wsClosedByUs) connectWs();
+        }, delay);
     };
 
     ws.onerror = () => {
@@ -218,6 +253,9 @@ function connectWs() {
         $('wsPill').className = 'pill';
     };
 }
+
+// 关页面时主动断开，避免重连定时器在卸载之后还尝试重连
+window.addEventListener('beforeunload', () => { wsClosedByUs = true; });
 
 function sendDanmaku() {
     if (!App.guard()) return;
@@ -313,6 +351,21 @@ window.addEventListener('beforeunload', () => {
     });
 });
 
+/**
+ * 在线心跳：每 20 秒打一次，告诉服务端"我还在这间房里"。
+ *
+ * <p>为什么必须有：服务端的在线集合是 ZSet（member=userId, score=最后心跳时间），
+ * 超过 60 秒没有心跳就会被自动剔除。这样即使浏览器崩溃/断网/被强杀
+ * （根本发不出 leave 请求），在线人数也不会只增不减。
+ */
+async function heartbeat() {
+    if (!App.isLogin() || !entered) return;
+    const { data } = await App.api(`/api/live/${roomId}/heartbeat`,
+        { method: 'POST', auth: true, silent: true });
+    // 心跳失败（比如 Token 过期）不打扰用户，下一次轮询会把状态显示出来
+    if (data && data.code !== 0) App.log('在线心跳失败：' + data.msg, 'err');
+}
+
 /* ==================== 初始化 ==================== */
 (async function init() {
     if (!roomId) {
@@ -330,5 +383,6 @@ window.addEventListener('beforeunload', () => {
     await enterRoom(true);          // 静默加入在线列表
 
     setInterval(refreshOnline, 5000);   // 定时刷新在线人数
+    setInterval(heartbeat, 20000);      // 在线心跳：续期"我还在线"
     setInterval(flushLike, 500);        // 人气：每 500ms 把本地攒的点赞合并上报一次
 })();

@@ -13,6 +13,8 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
  *   /api/video/** 需要身份校验：点赞必须知道"是谁点的"，userId 从 Token 取，
  *     绝不接受前端传参 —— 否则任何人都能伪造"别人给我的视频点赞"。
  *   /api/auth/phone/**（绑定手机号）需要登录；/api/auth/sms/**（发码、手机号登录）公开。
+ *   /api/sensitive/**（敏感词管理/调试）、/api/count/**（早期计数演示）也需要登录 ——
+ *     这两个接口原来不在拦截范围内，任何人都能调，其中 /reload 会触发全表扫描，是个 DoS 入口。
  *   注意：GET /api/live/rooms 直播间列表对游客放行（见 JwtInterceptor 里的方法级判断），
  *   但 POST /api/live/rooms（创建）、/start、/stop 仍需登录。
  *
@@ -44,7 +46,12 @@ public class WebConfig implements WebMvcConfigurer {
                         // 视频点赞：需要登录态才能拿到 userId
                         "/api/video/**",
                         // 绑定手机号需要登录（取 userId）；/api/auth/sms/** 是公开的，不在此列
-                        "/api/auth/phone/**")
+                        "/api/auth/phone/**",
+                        // 管理/调试类接口：原来完全裸奔（任何人都能 POST /api/sensitive/reload
+                        // 触发全表扫描 + 重建 Trie，等于一个免费的 DoS 入口；
+                        // /api/count/** 更是"谁都能给任意目标刷计数"）。至少要求登录态。
+                        "/api/sensitive/**",
+                        "/api/count/**")
                 .excludePathPatterns(
                         "/api/user/login",
                         "/api/user/register",

@@ -2,8 +2,8 @@ package com.live.controller;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.live.common.Result;
-import com.live.entity.LiveRoom;
 import com.live.service.LiveRoomService;
+import com.live.vo.CreateLiveRoomRequest;
 import com.live.vo.LiveRoomVO;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
@@ -22,7 +22,8 @@ import org.springframework.web.bind.annotation.*;
  *   - 列表 / 展示类接口不涉及身份，无需 Token。
  *
  * 参数校验：类上 @Validated 让 @RequestParam/@PathVariable 的约束注解(@Min/@Max/@Positive)生效；
- *           create 的 @RequestBody LiveRoom 用 @Valid 触发 @NotBlank/@Size 校验。
+ *           create 的 @RequestBody 用 CreateLiveRoomRequest + @Valid 触发字段校验
+ *           （**不再用 LiveRoom 实体接参**，否则客户端能指定 id/anchorId 等所有字段）。
  */
 @Validated
 @RestController
@@ -53,12 +54,17 @@ public class LiveRoomController {
      * 创建直播间（主播首次开播）。
      * POST /api/live/rooms
      * Body: {"title":"我的第一场直播","category":"游戏","tags":"王者荣耀,教学"}
-     * 身份：从 Token 取 userId 作为 anchorId（前端不用再传 anchorId，也传不了真的）
+     *
+     * <p>身份：从 Token 取 userId 作为 anchorId（前端不用再传 anchorId，也传不了真的）。
+     *
+     * <p>入参用 {@link CreateLiveRoomRequest} 而不是 {@code LiveRoom} 实体：
+     * 实体接参会让客户端能直接指定 {@code id / anchorId / isLiving / likeCount / createTime}
+     * —— 这不仅是批量赋值漏洞，攻击者传别人的 {@code id} 还能触发"清空该直播间 Redis 人气"。
      */
     @PostMapping
-    public Result<Long> create(@Valid @RequestBody LiveRoom room,
+    public Result<Long> create(@Valid @RequestBody CreateLiveRoomRequest req,
                                @RequestAttribute("userId") Long userId) {
-        return liveRoomService.create(room, userId);
+        return liveRoomService.create(req, userId);
     }
 
     /**

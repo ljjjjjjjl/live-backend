@@ -7,8 +7,10 @@ spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/db1?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
-    username: root
-    password: 123456
+    # ⚠️ 生产用环境变量注入（DB_USERNAME / DB_PASSWORD），别把真实密码提交进仓库。
+    #    这里保留本地默认值只是为了"clone 下来就能跑"，属于演示工程的取舍。
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:123456}
     # ⭐ Hikari 连接池显式配置（2026-09-14 补）
     # 不显式配的话，Spring Boot 默认 maximum-pool-size=10 —— 点赞这种高并发短事务一上来就排队；
     # 再叠加"事务里调 Redis、Redis 抖 3s 就白占连接 3s"，10 个连接瞬间耗尽 → 雪崩。
@@ -63,14 +65,17 @@ mybatis-plus:
 # 日志级别
 logging:
   level:
-    # MyBatis 的 SQL 日志走 Mapper 全限定名（如 com.live.mapper.VideoMapper）
-    com.live.mapper: debug                     # 其它 Mapper 的 SQL 照旧打印（原来 StdOutImpl 的效果）
+    # ⚠️ 默认（生产）profile 里 SQL 日志必须收起来：
+    #    debug 级别会把每一条 SQL + 每条参数都打出来，高 QPS 下既拖慢吞吐、又把数据打进日志文件。
+    #    本地想看 SQL 请用 dev profile（见 application-dev.yml）。
+    com.live.mapper: warn
     com.live.mapper.SensitiveWordMapper: warn  # 敏感词全量加载不打行日志（⚠️ 只是不打印，词库照常加载）
 
 # JWT 配置
 jwt:
-  # 签名密钥（HS256 要求至少 32 字节，这里给一个足够长的字符串；生产要用环境变量，别写死在代码里）
-  secret: live-backend-jwt-secret-key-please-change-in-production-0123456789
+  # 签名密钥（HS256 要求至少 32 字节）。⚠️ 生产必须用环境变量 JWT_SECRET 注入：
+  #    一旦密钥泄漏，攻击者可以自己签发任意 userId 的 Token（等于拿下所有账号）。
+  secret: ${JWT_SECRET:live-backend-jwt-secret-key-please-change-in-production-0123456789}
   # 单次 Token 有效期（毫秒）。这里 2 小时。
   # 注意：JWT 的 exp 在签发时就写进了 Token 内部并被签名保护，服务端**改不了已签发的 Token**，
   # 所以"活跃期间自动续期"只能靠"换发新 Token"实现 —— 见下面 refresh-threshold。
@@ -89,10 +94,36 @@ jwt:
 
 # 应用自定义配置
 app:
+  # WebSocket 允许的来源。默认 * 仅为本地演示，生产务必改成自己的前端域名
+  # （启动时会打一条 WARN 提醒，避免"开发期放开、上线忘了改"）。
+  ws:
+    allowed-origin-patterns: ${WS_ALLOWED_ORIGINS:*}
+
+  # 直播间：在线人数回写（Redis → live_room.online_count）
+  live:
+    online-sync-interval: 30000   # 回写间隔（fixedDelay：上一轮跑完再等 30s）
+    online-sync-batch: 500        # 单轮最多同步多少个直播中的房间
+
   sms:
-    # 开发环境：在 /api/auth/sms/send 响应里回显 Mock 验证码，方便测试。
-    # ⚠️ 生产环境必须设为 false，否则任何人都能从接口响应里直接拿到验证码。
-    expose-mock-code: true
+    # ⚠️ 生产默认安全：两个开关默认都是 false，**只在 dev/test profile 里被打开**
+    #    （见 application-dev.yml；测试用 src/test/resources/application-test.yml）
+    #
+    # ① mock-enabled：是否装配 MockSmsSender（不真实发送短信）。
+    #    默认 false —— 生产环境不会加载 Mock 实现，避免"短信没发出去但接口返回成功"的静默故障。
+    #    本地演示请用：mvn spring-boot:run -Dspring-boot.run.profiles=dev
+    mock-enabled: false
+
+    # ② expose-mock-code：是否在 /api/auth/sms/send 的响应里回显验证码。
+    #    默认 false。若在非 dev/test profile 下设为 true，SmsConfigValidator 会让应用**启动失败**——
+    #    因为它等于把任意手机号的登录凭证公开在接口响应里。
+    expose-mock-code: false
+
+    # ③ 验证码生命周期与风控参数（全部可调，默认值即生产建议值）
+    code-expire-minutes: 5           # 验证码有效期
+    resend-interval-seconds: 60      # 同一手机号两次发送的最小间隔（发送频率限制）
+    daily-send-limit: 10             # 同一手机号每日发送上限（防短信轰炸/刷费用）
+    max-verify-attempts: 5           # 同一验证码最大连续校验失败次数，超过即作废
+    verify-attempt-window-minutes: 5 # 失败计数的窗口
 
   # 视频点赞相关（第 4 周：权威同步写 + 派生态异步刷回）
   like:

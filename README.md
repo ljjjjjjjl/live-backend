@@ -25,9 +25,9 @@
 
 | 规模 | 数量 |
 |---|---|
-| REST 接口 | **30 个** + 1 个 WebSocket 通道 |
+| REST 接口 | **32 个** + 1 个 WebSocket 通道 |
 | 数据表 | **11 张**（其中收藏 / 转发 / 评论 4 张为设计储备，功能未实现） |
-| Java 源文件 | 66 个 |
+| Java 源文件 | 78 个主代码 + 6 个测试类（34 个测试用例） |
 | 演示页面 | 6 个（原生 HTML/CSS/JS，启动即可访问） |
 
 ## 功能清单
@@ -45,10 +45,11 @@
 - [x] 直播推荐（个性化召回 + 冷启动兜底）
 
 **实时互动（Redis）**
-- [x] 在线人数：Set（`SADD` / `SREM` / `SCARD`）
-- [x] 礼物榜：ZSet（`ZINCRBY` / `ZREVRANGE`）
+- [x] 在线人数：ZSet `member=userId / score=最后心跳时间`（`ZADD` / `ZREM` / `ZREMRANGEBYSCORE` + `ZCARD`，**心跳超时自动剔除**）
+- [x] 在线人数**回写** `live_room.online_count`（每 30 秒一次，让"按在线人数排序"真正生效）
+- [x] 礼物榜：ZSet（`ZINCRBY` / `ZREVRANGE WITHSCORES`）
 - [x] 直播间人气：`INCRBY` + **Lua 限速（20 次/秒）**，开播归零、关播结算写回 MySQL
-- [x] 弹幕：WebSocket 分房间广播，握手用 token 校验身份，异常回执而非静默失败
+- [x] 弹幕：WebSocket 分房间广播，握手用**一次性票据**换连接，异常回执而非静默失败
 
 **视频与点赞**
 - [x] 视频推荐（分类召回 + 热度排序 + 排除已看 + 冷启动兜底）
@@ -59,9 +60,10 @@
 - [x] DFA（Trie）敏感词过滤，词库启动全量加载 + 支持热更新
 
 **工程化**
-- [x] 参数校验（Jakarta Validation）+ 全局异常处理
+- [x] 参数校验（Jakarta Validation）+ 全局异常处理（**HTTP 状态码按语义返回**：400/404/405/409/415/500）
 - [x] Hikari 连接池显式配置（上限 20 + 10s 泄漏检测）
-- [ ] 单元测试 / Swagger / Docker（未做）
+- [x] 单元测试 34 个（`src/test/java`，覆盖短信验证码原子消费、注册/绑定手机号安全、配置校验）
+- [ ] Swagger / Docker（未做）
 
 ## 技术栈
 
@@ -116,15 +118,22 @@ Redis 读写与异步投递全部放在**事务提交之后**：
 点赞/取消点赞 ──► SADD like:dirty:video {videoId}      ← 谁改谁标记，Set 天然去重
                         │  每 30 秒
                         ▼
-        ① 脏集合对账（主力）SPOP 一批(默认 1000) → 只查这批 videoId 的真实赞数 → 只改对不上的行
-                        │
+        ① 脏集合对账（主力）取一批(默认 1000) → 只查这批 videoId 的真实赞数 → 只改对不上的行
+                        │  顺带把修正后的值同步进 Redis 展示计数
                         ▼
         ② 全量对账（兜底）每天凌晨 3 点跑一遍 —— Redis 丢了脏集合也不会永久漏修
 ```
 
-四个刻意的设计点：**Set 去重**（同一视频点 1 万次只留一个成员）、**用 `SPOP` 而不是 `SMEMBERS`+`SREM`**
-（原子弹出，不会"取了还没删就崩"）、**限批**（避免对账自己攒成大事务）、
-**`SPOP` 放在事务外**（事务回滚不会把弹出的 videoId 弄丢）。
+四个刻意的设计点：**Set 去重**（同一视频点 1 万次只留一个成员）、
+**「非破坏性取样 → 处理成功 → 再 `SREM`」而不是 `SPOP`**（`SPOP` 把"取出"和"删除"合成一步，
+标记在数据库操作**之前**就没了：这一批随后失败/进程重启，这些 videoId 就永久丢失，只能等凌晨全量兜底；
+现在的写法失败就留在集合里下轮重试）、**限批**（避免对账自己攒成大事务）、
+**Redis 操作一律在事务外**。
+
+> 还有两处针对"偏差永不自愈"的修补（2026-10-17）：
+> ① 对账**同时修 Redis**计数（原来只修 `video.like_count`，而列表页展示读的是 Redis，
+> 且该 key 不设 TTL → 修了库不修缓存，用户看到的还是错的）；
+> ② 脏集合里混进非法成员时**过滤掉**，否则 `Long.valueOf` 抛异常会让对账任务每 30 秒崩一次、彻底停摆。
 
 ### 5. 索引优化：EXPLAIN 驱动，实测 189ms → 0.24ms
 
@@ -151,16 +160,17 @@ mysql -uroot -p < src/main/resources/sql/live_room_index.sql       # 直播间�
 mysql -uroot -p < src/main/resources/sql/video_index.sql           # 视频热度 / 分区索引
 mysql -uroot -p < src/main/resources/sql/db1_repair_20261007.sql   # 数据/元数据修复（可选）
 
-# 2) 改配置：src/main/resources/application.yml（MySQL / Redis 连接）
-# 3) 启动
-mvn spring-boot:run
+# 2) 改配置：src/main/resources/application.yml（MySQL / Redis 连接；密码和 JWT 密钥都支持环境变量覆盖）
+# 3) 启动（⚠️ 本地演示必须带 dev profile，否则 mock 短信是关的、发码接口会直接失败）
+mvn spring-boot:run -Dspring-boot.run.profiles=dev
 # 4) 打开演示页
 #    http://localhost:8080/         登录 / 注册
 #    http://localhost:8080/live.html 直播间列表    room.html?id=204 直播间详情
 #    http://localhost:8080/home.html 视频推荐      like.html 点赞并发压测
 ```
 
-> ⚠️ `application.yml` 里的数据库密码 / JWT 密钥是**本地演示用**的默认值，生产环境请用环境变量注入。
+> ⚠️ `application.yml` 里的数据库密码 / JWT 密钥支持 `${DB_PASSWORD}` / `${JWT_SECRET}` 环境变量覆盖，
+> 文件里的值只是本地演示默认值。默认（生产）profile 下 SQL 日志级别是 `warn`，想看 SQL 用 dev profile。
 
 ## 接口一览
 
@@ -188,14 +198,16 @@ mvn spring-boot:run
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/live/{roomId}/enter` | 进房（在线 +1） |
-| POST | `/api/live/{roomId}/leave` | 离房（在线 -1） |
-| GET | `/api/live/{roomId}/online` | 当前在线人数 · 游客可读 |
+| POST | `/api/live/{roomId}/enter` | 进房（ZSet 记一次心跳） |
+| POST | `/api/live/{roomId}/heartbeat` | 在线心跳（每 20s 一次，60s 没心跳自动剔除） |
+| POST | `/api/live/{roomId}/leave` | 离房（仅"加速收敛"，不靠它保正确） |
+| GET | `/api/live/{roomId}/online` | 当前在线人数（先剔除超时成员再计数）· 游客可读 |
 | POST | `/api/live/{roomId}/like` | 点赞（body `{"delta":N}`，可连点、限速 20/s） |
 | GET | `/api/live/{roomId}/like` | 当前人气 · 游客可读 |
 | POST | `/api/live/{roomId}/gift` | 送礼物（收礼者 = 房间主播，服务端推导） |
-| GET | `/api/live/{roomId}/gift/rank` | 礼物榜 TopN · 游客可读 |
-| WS | `/ws/danmaku/{roomId}?token=` | 实时弹幕 |
+| GET | `/api/live/{roomId}/gift/rank` | 礼物榜 TopN（`top` 夹在 1~100）· 游客可读 |
+| POST | `/api/danmaku/ws-ticket` | 换 WS 握手票据（60s、一次性） |
+| WS | `/ws/danmaku/{roomId}?ticket=` | 实时弹幕（兼容 `?token=`） |
 
 **视频与弹幕**
 
@@ -207,28 +219,28 @@ mvn spring-boot:run
 | GET | `/api/video/{videoId}/like` | 点赞状态 + 总数 |
 | GET | `/api/video/liked-ids` | 我赞过的视频 ID |
 | GET | `/api/danmaku` | 历史弹幕（分页）· 游客可读 |
-| POST | `/api/danmaku` | 服务端代发弹幕（经 DFA 过滤） |
+| POST | `/api/danmaku` | 服务端代发弹幕（经 DFA 过滤；昵称由服务端查库，不采信前端） |
 
-**调试 / 管理**
+**调试 / 管理**（均需登录）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/sensitive/check`、`/filter`、`/count` | 敏感词检查 / 过滤 / 数量 |
-| POST | `/api/sensitive/reload` | 词库热更新 |
+| POST | `/api/sensitive/reload` | 词库热更新（3 秒节流，防 DoS） |
 | POST | `/api/count/{targetId}/{type}`、GET `/api/count/{targetId}` | ⚠️ 早期演示接口，已被正式点赞接口取代 |
 
 ## 目录结构
 
 ```
 src/main/java/com/live/
-├── common/      统一返回体、业务异常、全局异常处理、DFA 敏感词过滤器
-├── config/      JWT 拦截器、WebSocket 配置、MyBatis-Plus 分页、Redis 序列化、密码编码器
-├── controller/  10 个 Controller（30 个接口）
+├── common/      统一返回体、业务异常、全局异常处理、DFA 敏感词过滤器、手机号脱敏、用户状态
+├── config/      JWT 拦截器、WebSocket 配置、MyBatis-Plus 分页、密码编码器、短信配置与校验
+├── controller/  10 个 Controller（32 个接口）
 ├── entity/      user / video / user_like / live_room / danmaku / sensitive_word ...
 ├── mapper/      MyBatis-Plus Mapper（含推荐与对账 SQL）
-├── service/     业务层（点赞、直播、推荐、弹幕、敏感词、短信、验证码）
-├── task/        点赞计数定时对账
-├── vo/          视图对象
+├── service/     业务层（点赞、直播、推荐、弹幕、敏感词、短信、验证码、WS 票据）
+├── task/        点赞计数定时对账 + 在线人数回写
+├── vo/          视图对象（请求 DTO + 返回 VO）
 └── websocket/   弹幕握手拦截器 + 分房间处理器
 
 src/main/resources/
@@ -245,9 +257,10 @@ src/main/resources/
   `video.like_count` 目前完全靠**两级对账**兜底（脏集合 30 秒一轮 + 每天凌晨全量兜底，见「核心设计 §4」）。
 - **收藏 / 转发 / 评论**：表已建，功能未实现（设计储备）。
 - **礼物榜只在 Redis**：`gift:rank:{roomId}` 未落库，Redis 淘汰即永久丢失；方案是补礼物流水表 + 异步落库。
-- **`live_room.online_count` 是静态列**：真值在 Redis，该列仅用于排序兜底，未接实时刷回。
 - **WebSocket 会话表在单机内存**，多机部署需要换成 Redis Pub/Sub 或 MQ 广播。
-- **无单元测试 / Swagger / Docker**：当前优先级是保证功能闭环与可演示。
+- **在线人数是"近似值"**：靠心跳续期 + 60 秒超时剔除，客户端崩溃时最多延迟 60 秒才减下来（这是刻意取舍：
+  靠客户端"上报离开"永远不可靠）。
+- **没有 Swagger / Docker**：当前优先级是保证功能闭环与可演示；单元测试 34 个，覆盖登录安全与验证码链路。
 
 ## 相关文档
 
@@ -255,6 +268,7 @@ src/main/resources/
 - [`README_RECOMMEND.md`](README_RECOMMEND.md) —— 视频模块与推荐设计
 - [`TODO清单.md`](TODO清单.md) —— 待办、优化项与技术债（含实测数据与数据库体检记录）
 - [`like-concurrency-test.js`](like-concurrency-test.js) / [`ws-test.js`](ws-test.js) —— 点赞并发压测与 WebSocket 冒烟脚本
+- [`verify-fixes.js`](verify-fixes.js) —— 本轮修复的回归验证脚本（`node verify-fixes.js`，可用 `BASE` 指定后端地址）
 
 ---
 

@@ -82,21 +82,20 @@ public class JwtInterceptor implements HandlerInterceptor {
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
             return reject(response, "未登录");
         }
+        // ② 校验 Token —— **只解析一次**（原来为了拿 userId/username/剩余时间/loginAt
+        //    分别调了 4 个方法，每个内部都 parseClaims 一遍，等于每请求验签 4 次）
         String token = authHeader.substring("Bearer ".length());
-
-        // ② 校验 Token
-        Long userId = jwtUtil.parseToken(token);
-        if (userId == null) {
+        JwtUtil.TokenInfo info = jwtUtil.parseTokenInfo(token);
+        if (info == null) {
             return reject(response, "Token无效或已过期");
         }
 
         // ③ 把身份放进 request，Controller 用 @RequestAttribute("userId") 取
-        String username = jwtUtil.getUsername(token);
-        request.setAttribute("userId", userId);
-        request.setAttribute("username", username);
+        request.setAttribute("userId", info.userId());
+        request.setAttribute("username", info.username());
 
         // ④ 滑动续期：临近过期就换发新 Token（通过响应头下发）
-        refreshIfNeeded(response, token, userId, username);
+        refreshIfNeeded(response, info);
 
         return true; // 放行
     }
@@ -114,19 +113,21 @@ public class JwtInterceptor implements HandlerInterceptor {
      *   <li>续期后的过期时间仍在会话绝对上限内（{@code loginAt + max-lifetime} 之内）。</li>
      * </ol>
      */
-    private void refreshIfNeeded(HttpServletResponse response, String token, Long userId, String username) {
+    private void refreshIfNeeded(HttpServletResponse response, JwtUtil.TokenInfo info) {
         // 阈值为 0 → 关闭滑动续期
         if (refreshThreshold <= 0) {
             return;
         }
 
-        long remaining = jwtUtil.getRemainingMillis(token);
+        long remaining = info.remainingMillis();
         // -1 = 无效/已过期（前面已拦掉）；剩余还多 → 不用续
         if (remaining < 0 || remaining > refreshThreshold) {
             return;
         }
 
-        long loginAt = jwtUtil.getLoginAt(token);
+        Long userId = info.userId();
+        String username = info.username();
+        long loginAt = info.loginAt();
         long now = System.currentTimeMillis();
 
         // 会话绝对上限：续期后新 Token 的过期时刻 = now + expire

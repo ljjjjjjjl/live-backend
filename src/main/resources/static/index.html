@@ -48,6 +48,22 @@
                     <button type="button" id="bindSendBtn" class="btn inline">获取验证码</button>
                 </span>
             </label>
+            <details id="rebindBox" style="margin-bottom:12px;">
+                <summary class="hint" style="cursor:pointer;">已绑过手机号？换绑必须验证原手机号</summary>
+                <label class="field" style="margin-top:10px;">
+                    <span class="label">原手机号</span>
+                    <span class="input-wrap">
+                        <input id="bindOldPhone" type="text" placeholder="原 11 位手机号" maxlength="11" inputmode="numeric">
+                    </span>
+                </label>
+                <label class="field">
+                    <span class="label">原验证码</span>
+                    <span class="input-wrap">
+                        <input id="bindOldCode" type="text" placeholder="原手机号收到的验证码" maxlength="6" inputmode="numeric">
+                        <button type="button" id="bindOldSendBtn" class="btn inline">获取原号验证码</button>
+                    </span>
+                </label>
+            </details>
             <button id="bindBtn" class="btn blue block" type="button">绑 定</button>
         </div>
 

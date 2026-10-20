@@ -1,32 +1,39 @@
 package com.live.controller;
 
+import com.live.common.PhoneMasker;
 import com.live.common.Result;
+import com.live.config.SmsProperties;
 import com.live.service.PhoneLoginService;
+import com.live.vo.BindPhoneRequest;
 import com.live.vo.LoginVO;
 import com.live.vo.PhoneLoginRequest;
 import com.live.vo.PhoneSendCodeRequest;
+import com.live.vo.SendCodeResponse;
 import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 手机号 + 短信验证码 登录接口（与账号密码登录共存，第 3 周扩展）。
  *
  * <ul>
- *   <li>POST /api/auth/sms/send    —— 发送验证码（Mock 发送，公开）</li>
+ *   <li>POST /api/auth/sms/send    —— 发送验证码（Mock/真实由 app.sms.mock-enabled 决定，公开）</li>
  *   <li>POST /api/auth/sms/login   —— 手机号 + 验证码 登录（公开，登录即注册，返回 JWT）</li>
- *   <li>POST /api/auth/phone/bind  —— 给已登录账号绑定/补填手机号（需 JWT）</li>
+ *   <li>POST /api/auth/phone/bind  —— 给已登录账号绑定/换绑手机号（需 JWT）</li>
  * </ul>
  *
- * <p><b>与现有登录共存</b>：本 Controller 是**新增**，不改 {@code UserController}。
- * 手机号登录成功后同样返回 {@link LoginVO}（token + 用户信息），前端拿 token 后走同一套鉴权。
- *
- * <p><b>鉴权路径</b>：{@code /api/auth/sms/**} 是公开的（发码/登录不需要 token）；
- * {@code /api/auth/phone/**} 需要 token（见 WebConfig 拦截配置），这样 bind 才能取到 userId。
+ * <h3>本轮安全修复要点</h3>
+ * <ol>
+ *   <li><b>不再用 {@code @Value} 读开关</b>，改用 {@link SmsProperties}（默认 false）；
+ *       且 {@code SmsConfigValidator} 会在非 dev/test profile 打开回显时**直接让应用启动失败**。</li>
+ *   <li><b>响应体换成 {@link SendCodeResponse}</b>：
+ *       手机号**只返回脱敏值**，{@code mockCode} 字段在生产环境**不会出现在 JSON 里**
+ *       （{@code @JsonInclude(NON_NULL)}）。旧实现返回 Map 并塞完整手机号，
+ *       一旦回显开关被误开，任意手机号都能直接登录。</li>
+ *   <li>换绑手机号需要旧手机号验证码，见 {@link BindPhoneRequest#getOldCode()}。</li>
+ * </ol>
  */
 @RestController
 @RequestMapping("/api/auth")
@@ -35,28 +42,24 @@ public class PhoneAuthController {
     @Autowired
     private PhoneLoginService phoneLoginService;
 
-    /**
-     * 是否在响应里回显 Mock 验证码（仅开发用）。
-     * 配置项：app.sms.expose-mock-code（默认 true 方便本地测试）。
-     * ⚠️ 生产环境把它设为 false —— 否则任何人都能从响应里直接拿到验证码。
-     */
-    @Value("${app.sms.expose-mock-code:true}")
-    private boolean exposeMockCode;
+    @Autowired
+    private SmsProperties smsProperties;
 
     /**
      * 发送短信验证码。
      * Body: {"phone":"13812345678"}
      *
-     * 开发阶段（app.sms.expose-mock-code=true）会把验证码放在 data.mockCode 里方便测试；
-     * 生产环境请设为 false，只返回发送成功。
+     * <p>响应 data = {phoneMasked:"138****5678", expireSeconds:300}；
+     * **仅** dev/test 且 {@code app.sms.expose-mock-code=true} 时才会多一个 {@code mockCode} 字段。
      */
     @PostMapping("/sms/send")
-    public Result<Map<String, String>> sendCode(@Valid @RequestBody PhoneSendCodeRequest req) {
+    public Result<SendCodeResponse> sendCode(@Valid @RequestBody PhoneSendCodeRequest req) {
         String code = phoneLoginService.sendCode(req.getPhone());
-        Map<String, String> data = new LinkedHashMap<>();
-        data.put("phone", req.getPhone());
-        if (exposeMockCode) {
-            data.put("mockCode", code);   // 仅开发环境回显
+        SendCodeResponse data = new SendCodeResponse(
+                PhoneMasker.mask(req.getPhone()),
+                (int) TimeUnit.MINUTES.toSeconds(smsProperties.getCodeExpireMinutes()));
+        if (smsProperties.isExposeMockCode()) {
+            data.setMockCode(code);   // 仅 dev/test 回显；生产该字段不存在
         }
         return Result.ok(data);
     }
@@ -72,14 +75,15 @@ public class PhoneAuthController {
     }
 
     /**
-     * 绑定手机号到当前登录账号（补填手机号）。
-     * Body: {"phone":"13812345678","code":"123456"}
+     * 绑定 / 换绑手机号到当前登录账号。
+     * Body: {"phone":"13812345678","code":"123456"}                  —— 首次绑定
+     *       {"phone":"13900000000","code":"123456","oldCode":"654321"} —— 换绑（oldCode 必填）
      * 需要请求头 Authorization: Bearer <token>；userId 由 JwtInterceptor 放进 request。
      */
     @PostMapping("/phone/bind")
-    public Result<Void> bindPhone(@Valid @RequestBody PhoneLoginRequest req,
+    public Result<Void> bindPhone(@Valid @RequestBody BindPhoneRequest req,
                                   @RequestAttribute("userId") Long userId) {
-        phoneLoginService.bind(userId, req.getPhone(), req.getCode());
+        phoneLoginService.bind(userId, req.getPhone(), req.getCode(), req.getOldCode());
         return Result.ok(null);
     }
 }

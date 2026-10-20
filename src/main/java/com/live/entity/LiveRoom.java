@@ -63,8 +63,15 @@ public class LiveRoom {
      * 直播间热度的计算方式。
      * 直播更看重"在线人数"（实时性），所以 online_count 权重最高；
      * like_count(人气)作为辅助。返回 0 表示没热度（不影响排序）。
+     *
+     * <p>⚠️ 用 {@code Long} 直接相乘会<b>自动拆箱</b>：任一字段为 null 就抛 NullPointerException。
+     * 而 {@code LiveRoom} 目前既会从数据库整行读出来，也会被 {@code create} 流程 new 出来，
+     * 完全可能出现"只填了部分字段"的实例。这类 NPE 会让整个列表接口 500，
+     * 所以这里显式做空值兜底。
      */
     public long liveScore() {
-        return onlineCount * 3L + likeCount;
+        long online = onlineCount == null ? 0L : onlineCount;
+        long like = likeCount == null ? 0L : likeCount;
+        return online * 3L + like;
     }
 }

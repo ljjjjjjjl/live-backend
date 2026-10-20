@@ -10,8 +10,11 @@ import com.live.vo.VideoVO;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -41,6 +44,16 @@ public class RecommendService {
     private static final int DEFAULT_SIZE = 20;
 
     /**
+     * "排除列表"最多带多少个 id。
+     *
+     * <p>为什么必须封顶：排除是靠 SQL 里的 {@code id NOT IN (...)} 实现的，
+     * 一个重度用户点过几万个赞时，这条 SQL 会带几万个参数 —— 既可能超过
+     * {@code max_allowed_packet}，解析成本也爆炸（MySQL 要逐个值比较）。
+     * 推荐流本来就只需要"别把最近看过的再推一遍"，取最近 200 条足够。
+     */
+    private static final int MAX_EXCLUDE = 200;
+
+    /**
      * 推荐入口。
      *
      * @param userId 当前登录用户ID，可为 null（未登录）
@@ -55,10 +68,14 @@ public class RecommendService {
             return hotFallback(null, limit);
         }
 
-        // 1) 查用户点过赞的所有视频 id —— 这既是"兴趣来源"，也是"要排除的已看过内容"
-        List<UserLike> likes = userLikeMapper.selectList(
-                new LambdaQueryWrapper<UserLike>().eq(UserLike::getUserId, userId));
-        List<Long> likedVideoIds = likes.stream().map(UserLike::getVideoId).collect(Collectors.toList());
+        // 1) 查用户最近点过赞的视频 id —— 既是"兴趣来源"，也是"要排除的已看过内容"
+        List<Long> likedVideoIds = userLikeMapper.selectList(
+                        new LambdaQueryWrapper<UserLike>()
+                                .select(UserLike::getVideoId)
+                                .eq(UserLike::getUserId, userId)
+                                .orderByDesc(UserLike::getCreateTime)
+                                .last("limit " + MAX_EXCLUDE))
+                .stream().map(UserLike::getVideoId).collect(Collectors.toList());
 
         // 2) 冷启动判断：一个赞都没点过 → 全站热门兜底
         if (likedVideoIds.isEmpty()) {
@@ -78,20 +95,26 @@ public class RecommendService {
         int perCategoryLimit = Math.max(1, limit / topCategories);
         List<VideoVO> result = new java.util.ArrayList<>();
 
+        // ⚠️ exclude 要同时包含"已点赞的"和"这一轮已经召回过的"。
+        //    原来只排除了 likedVideoIds，于是第 5 步兜底补齐时会把第 4 步已经返回的
+        //    热门视频再查一遍 —— 用户滑推荐流时会看到同一部视频出现两次。
+        Set<Long> exclude = new LinkedHashSet<>(likedVideoIds);
+
         for (int i = 0; i < topCategories; i++) {
             String category = prefs.get(i).getCategory();
             List<Video> videos = videoMapper.selectByCategoryExcludeAndOrderByHot(
-                    category, likedVideoIds, perCategoryLimit);
+                    category, new ArrayList<>(exclude), perCategoryLimit);
             for (Video v : videos) {
                 // 推荐理由：跟你常看的分类相关
                 result.add(VideoVO.from(v, "与你常看的相似"));
+                exclude.add(v.getId());
             }
         }
 
         // 5) 如果分类召回后还不够 limit 条，用全站热门补齐（保证列表长度稳定）
         //    这一步在面试里叫"闭环兜底"，防止冷门分类候选不够。
         if (result.size() < limit) {
-            List<Video> hot = videoMapper.selectHotExclude(likedVideoIds, limit - result.size());
+            List<Video> hot = videoMapper.selectHotExclude(new ArrayList<>(exclude), limit - result.size());
             for (Video v : hot) {
                 result.add(VideoVO.from(v, "热门"));
             }

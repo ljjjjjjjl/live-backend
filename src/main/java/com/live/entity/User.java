@@ -44,7 +44,20 @@ public class User {
 
     /** 手机号：可空；非空时才校验（11 位，1 开头） */
     @Pattern(regexp = "^$|^1\\d{10}$", message = "手机号格式错误")
-    private String phone;      // 手机号
+    private String phone;      // 手机号（数据库 uk_phone 唯一；只能通过短信验证码绑定，注册接口不允许直接写）
+
+    /**
+     * 账号状态：{@code NORMAL}（可登录）/ {@code BANNED} / {@code DELETED} / {@code DISABLED} / {@code LOCKED}。
+     *
+     * <p><b>安全约定</b>：
+     * <ul>
+     *   <li>该字段**永远由服务端赋值**（注册/手机号建号时写 {@link com.live.common.UserStatus#NORMAL}），
+     *       客户端入参走 DTO，DTO 里没有这个字段；</li>
+     *   <li>登录前用 {@link com.live.common.UserStatus#canLogin(String)}（白名单）判定。</li>
+     * </ul>
+     * 对应迁移脚本 {@code src/main/resources/sql/user_security_20261009.sql}。
+     */
+    private String status;     // 账号状态
 
     private LocalDateTime createTime; // 创建时间
 }

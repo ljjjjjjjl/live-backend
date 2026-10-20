@@ -18,16 +18,19 @@ const $ = (id) => document.getElementById(id);
 const out = (id, text) => { $(id).textContent = typeof text === 'string' ? text : JSON.stringify(text, null, 2); };
 
 /* ==================== 敏感词 ==================== */
+/* ⚠️ 这些接口现在都要登录（后端把 /api/sensitive/** 纳入了 JWT 拦截）——
+   之前它们完全裸奔，任何人循环 POST /reload 就能让服务端不停地全表读 + 重建 Trie。 */
 async function loadWordCount() {
-    const { data, status } = await App.api('/api/sensitive/count', { silent: true });
+    const { data, status } = await App.api('/api/sensitive/count', { auth: true, silent: true });
     $('wordCount').textContent = data.code === 0
         ? `当前词库 ${data.data} 个词`
-        : `词库读取失败（HTTP ${status}）`;
+        : (status === 401 ? '未登录（管理接口需要登录）' : `词库读取失败（HTTP ${status}）`);
 }
 
 $('swCheck').addEventListener('click', async () => {
+    if (!App.guard()) return;
     const text = $('swText').value;
-    const { data } = await App.api('/api/sensitive/check?text=' + encodeURIComponent(text));
+    const { data } = await App.api('/api/sensitive/check?text=' + encodeURIComponent(text), { auth: true });
     if (data.code !== 0) return out('swResult', '失败：' + data.msg);
     const d = data.data;
     out('swResult', d.pass
@@ -36,15 +39,17 @@ $('swCheck').addEventListener('click', async () => {
 });
 
 $('swFilter').addEventListener('click', async () => {
+    if (!App.guard()) return;
     const text = $('swText').value;
-    const { data } = await App.api('/api/sensitive/filter?text=' + encodeURIComponent(text));
+    const { data } = await App.api('/api/sensitive/filter?text=' + encodeURIComponent(text), { auth: true });
     if (data.code !== 0) return out('swResult', '失败：' + data.msg);
     out('swResult', `原文：  ${data.data.text}\n过滤后：${data.data.filtered}`);
 });
 
 $('swReload').addEventListener('click', async () => {
+    if (!App.guard()) return;
     App.setLoading($('swReload'), true, '加载中');
-    const { data } = await App.api('/api/sensitive/reload', { method: 'POST' });
+    const { data } = await App.api('/api/sensitive/reload', { method: 'POST', auth: true });
     App.setLoading($('swReload'), false);
     if (data.code !== 0) return App.toast(data.msg || '热更新失败', 'error');
     App.toast(data.data, 'success', '词库已热更新');
@@ -53,17 +58,19 @@ $('swReload').addEventListener('click', async () => {
 
 /* ==================== 计数缓存 ==================== */
 $('cntIncr').addEventListener('click', async () => {
+    if (!App.guard()) return;
     const id = $('cntTarget').value.trim();
     const type = $('cntType').value;
-    const { data } = await App.api(`/api/count/${id}/${type}`, { method: 'POST' });
+    const { data } = await App.api(`/api/count/${id}/${type}`, { method: 'POST', auth: true });
     if (data.code !== 0) return out('cntResult', '失败：' + data.msg);
     out('cntResult', `${type} 计数 +1 成功，当前值 = ${data.data}`);
     App.toast(`${id} 的 ${type} 现在是 ${data.data}`, 'success');
 });
 
 $('cntRead').addEventListener('click', async () => {
+    if (!App.guard()) return;
     const id = $('cntTarget').value.trim();
-    const { data } = await App.api(`/api/count/${id}`);
+    const { data } = await App.api(`/api/count/${id}`, { auth: true });
     if (data.code !== 0) return out('cntResult', '失败：' + data.msg);
     out('cntResult', data.data);
 });

@@ -111,6 +111,54 @@ public class JwtUtil {
     }
 
     /**
+     * Token 解析结果（一次解析拿到全部需要的字段）。
+     *
+     * @param userId          用户ID（Token 的 sub）
+     * @param username        用户名
+     * @param remainingMillis 还剩多少毫秒过期（可能为负，表示已过期）
+     * @param loginAt         首次登录时间戳（毫秒），用于算会话绝对上限
+     */
+    public record TokenInfo(Long userId, String username, long remainingMillis, long loginAt) {
+    }
+
+    /**
+     * <b>一次</b>解析出拦截器需要的全部信息。
+     *
+     * <p>为什么要加这个方法：JWT 的解析＝"Base64 解码 + HMAC 验签"，是纯 CPU 活。
+     * 原来 {@code JwtInterceptor} 在每个需要登录的请求里分别调了
+     * {@code parseToken / getUsername / getRemainingMillis / getLoginAt}，
+     * 而它们内部各自 {@code parseClaims} 一遍 —— 等于<b>每个请求验签 4 次</b>。
+     * 高 QPS 下这就是白烧的 CPU（也是压测时容易被忽略的一个损耗点）。
+     *
+     * @return 无效 Token 返回 null
+     */
+    public TokenInfo parseTokenInfo(String token) {
+        Claims claims = parseClaims(token);
+        if (claims == null) {
+            return null;
+        }
+        Long userId;
+        try {
+            userId = Long.valueOf(claims.getSubject());
+        } catch (NumberFormatException e) {
+            return null;   // sub 不是数字 = 不是我们签发的 Token
+        }
+        long remaining = claims.getExpiration() == null
+                ? -1
+                : claims.getExpiration().getTime() - System.currentTimeMillis();
+        return new TokenInfo(userId, claims.get("username", String.class), remaining, loginAtOf(claims));
+    }
+
+    /** 从已解析的 Claims 里取"首次登录时间"（兼容没有 loginAt 声明的旧 Token） */
+    private long loginAtOf(Claims claims) {
+        Object at = claims.get(CLAIM_LOGIN_AT);
+        if (at instanceof Number) {
+            return ((Number) at).longValue();
+        }
+        return claims.getIssuedAt() == null ? -1 : claims.getIssuedAt().getTime();
+    }
+
+    /**
      * 从 Token 里取 username（可选，方便前端展示；不放敏感信息即可）。
      */
     public String getUsername(String token) {
@@ -146,10 +194,6 @@ public class JwtUtil {
         if (claims == null) {
             return -1;
         }
-        Object at = claims.get(CLAIM_LOGIN_AT);
-        if (at instanceof Number) {
-            return ((Number) at).longValue();
-        }
-        return claims.getIssuedAt() == null ? -1 : claims.getIssuedAt().getTime();
+        return loginAtOf(claims);
     }
 }

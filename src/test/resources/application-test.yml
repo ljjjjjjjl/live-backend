@@ -1,0 +1,22 @@
+# 测试 profile（位于 src/test/resources，只对测试生效，不会打进生产包）
+#
+# 目的：测试需要一个**能真正跑通**的短信链路，所以在这里打开 Mock 短信；
+#       同时把 expose-mock-code 保持 false（生产默认值），
+#       需要"回显验证码"的用例用 @SpringBootTest(properties = "app.sms.expose-mock-code=true") 单独覆盖。
+#
+# 依赖：本机 MySQL(3306, db1) 与 Redis(6379) 需已启动（与 application.yml 相同）。
+app:
+  sms:
+    mock-enabled: true
+    expose-mock-code: false
+    code-expire-minutes: 5
+    resend-interval-seconds: 60
+    daily-send-limit: 10
+    max-verify-attempts: 5
+    verify-attempt-window-minutes: 5
+
+logging:
+  level:
+    # 测试时不用打业务 SQL；审计日志保留 warn 以上，便于断言失败时排查
+    com.live.mapper: warn
+    com.live.audit: info

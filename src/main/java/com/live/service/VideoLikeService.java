@@ -86,6 +86,14 @@ public class VideoLikeService {
      */
     private static final String LIKE_COUNT_KEY = "video:like:count:";
 
+    /** 供对账服务复用（避免 key 命名散落在两个类里）。对外只暴露这个常量，不暴露 Redis 操作细节 */
+    public static String countKey(Long videoId) {
+        return LIKE_COUNT_KEY + videoId;
+    }
+
+    /** 「我点过赞的视频」最多返回多少条（见 {@link #likedVideoIds} 的说明） */
+    private static final int LIKED_IDS_LIMIT = 500;
+
     /**
      * 「存在则原子累加、不存在则让调用方去重建」的 Lua 脚本。
      *
@@ -240,6 +248,15 @@ public class VideoLikeService {
      * 行数门控的判断与 Redis 操作都在事务<b>提交之后</b>做。
      */
     public LikeResultVO unlike(Long userId, Long videoId) {
+        // ⚠️ 本轮修复：这里原来**没有** requireVideoExists。
+        //    后果很实际：unlike 走不到 1 行删除，但仍会执行 warmCountIfAbsent → rebuildCount，
+        //    而 rebuildCount 是「SELECT COUNT(*) 然后无条件 SET video:like:count:{id}」，
+        //    这个 key **没有 TTL**。于是任何一个登录用户只要遍历 id 调
+        //    DELETE /api/video/{随便一个不存在的id}/like，就能在 Redis 里凭空造出
+        //    无数个永不删除的 key（内存打满），顺便把"不存在的视频"也写进缓存。
+        //    对称性检查：like() 有 requireVideoExists，unlike() 必须有。
+        requireVideoExists(videoId);
+
         // 同样要"变更前捂热"：若在 DELETE 之后才重建，COUNT 已经少了一条，再 -1 就是【重复递减】
         warmCountIfAbsent(videoId);
 
@@ -292,10 +309,24 @@ public class VideoLikeService {
         return rebuildCount(videoId);
     }
 
-    /** 当前用户点过赞的所有视频 ID（供列表页标记"已赞"状态，避免逐条查询） */
+    /**
+     * 当前用户点过赞的所有视频 ID（供列表页标记"已赞"状态，避免逐条查询）。
+     *
+     * <p>本轮修复：这里原来是<b>无 LIMIT 的全量 selectList</b>，一个重度用户点了几万个赞时，
+     * 一次请求就要把几万行读出来、序列化成 JSON 返回。现在：
+     * <ul>
+     *   <li>只 {@code select(videoId)}，不把整行实体读出来（少读一堆用不到的列）；</li>
+     *   <li>按 {@code create_time DESC} 取最近 {@value #LIKED_IDS_LIMIT} 条，走 {@code idx_user_time}
+     *       —— 列表页只需要"最近赞过的"，历史久远的赞在首屏判断里意义也不大；</li>
+     *   <li>语义变化写在这里：返回的是"最近的 500 个已赞 ID"。</li>
+     * </ul>
+     */
     public List<Long> likedVideoIds(Long userId) {
         return userLikeMapper.selectList(new LambdaQueryWrapper<UserLike>()
-                        .eq(UserLike::getUserId, userId))
+                        .select(UserLike::getVideoId)
+                        .eq(UserLike::getUserId, userId)
+                        .orderByDesc(UserLike::getCreateTime)
+                        .last("limit " + LIKED_IDS_LIMIT))
                 .stream()
                 .map(UserLike::getVideoId)
                 .collect(Collectors.toList());

@@ -1,0 +1,20 @@
+# 本地开发 / 演示 profile：`mvn spring-boot:run -Dspring-boot.run.profiles=dev`
+#
+# 只有这个 profile（以及测试用的 test profile）才允许：
+#   ① 装配 Mock 短信实现（验证码不真实发送，打到日志）；
+#   ② 在发码接口响应里回显验证码，方便本地联调。
+#
+# 生产环境绝不能激活本 profile —— SmsConfigValidator 会在非 dev/test profile
+# 打开 expose-mock-code 时直接终止启动。
+app:
+  sms:
+    mock-enabled: true
+    expose-mock-code: true
+
+logging:
+  level:
+    # 本地开发想看 SQL：默认（生产）配置里是 warn，只有 dev 打开 debug。
+    # MyBatis 的 SQL 日志走 Mapper 全限定名（如 com.live.mapper.VideoMapper）。
+    com.live.mapper: debug
+    # 审计日志（绑定/换绑/登录拒绝）：本地也打出来，方便观察
+    com.live.audit: info

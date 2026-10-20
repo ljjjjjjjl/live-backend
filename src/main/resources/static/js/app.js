@@ -3,9 +3,10 @@
    接口：
      POST /api/user/register    {username,password,name}
      POST /api/user/login       {username,password}  -> LoginVO
-     POST /api/auth/sms/send    {phone}              -> {phone,mockCode}
+     POST /api/auth/sms/send    {phone}              -> {phoneMasked,expireSeconds[,mockCode]}
      POST /api/auth/sms/login   {phone,code}         -> LoginVO
-     POST /api/auth/phone/bind  {phone,code}  (需 Token)
+     POST /api/auth/phone/bind  {phone,code[,oldCode]} (需 Token；换绑必须带 oldCode)
+   注意：服务端只回传**脱敏**手机号（phoneMasked），mockCode 只在 dev profile 下出现。
    ========================================================= */
 
 App.renderNav('login');
@@ -155,8 +156,9 @@ async function sendCode(btn, phoneInput, codeInput) {
     if (data.code === 0) {
         startCountdown(btn);
         const mock = data.data && data.data.mockCode;
-        if (mock && codeInput) codeInput.value = mock;   // 开发环境自动填入
-        App.toast(mock ? `Mock 验证码 ${mock} 已自动填入` : `验证码已发送至 ${phone}`,
+        const masked = (data.data && data.data.phoneMasked) || phone;
+        if (mock && codeInput) codeInput.value = mock;   // 仅 dev profile 会回显
+        App.toast(mock ? `Mock 验证码 ${mock} 已自动填入` : `验证码已发送至 ${masked}`,
             'success', '验证码已发送');
     } else {
         App.toast(data.msg || '发送失败', 'error', '发送失败');
@@ -167,6 +169,8 @@ $('sendCodeBtn').addEventListener('click', (e) =>
     sendCode(e.currentTarget, $('smsPhone'), $('smsCode')));
 $('bindSendBtn').addEventListener('click', (e) =>
     sendCode(e.currentTarget, $('bindPhone'), $('bindCode')));
+$('bindOldSendBtn').addEventListener('click', (e) =>
+    sendCode(e.currentTarget, $('bindOldPhone'), $('bindOldCode')));
 
 /* ---------------- 手机号验证码登录 ---------------- */
 $('smsForm').addEventListener('submit', async (e) => {
@@ -190,16 +194,27 @@ $('smsForm').addEventListener('submit', async (e) => {
 $('bindBtn').addEventListener('click', async () => {
     const phoneEl = $('bindPhone'), codeEl = $('bindCode');
     const phone = phoneEl.value.trim(), code = codeEl.value.trim();
+    const oldPhone = ($('bindOldPhone').value || '').trim();
+    const oldCode = ($('bindOldCode').value || '').trim();
 
     if (!PHONE_RE.test(phone)) return invalid(phoneEl, '手机号格式不正确');
     if (!code) return invalid(codeEl, '请输入验证码（每个码只能用一次，请重新获取）');
+    // 换绑（已绑过手机号）必须额外验证原手机号，否则服务端会拒绝
+    if (oldPhone && !PHONE_RE.test(oldPhone)) return invalid($('bindOldPhone'), '原手机号格式不正确');
+    if (oldPhone && !oldCode) return invalid($('bindOldCode'), '换绑需要原手机号验证码');
+
+    const body = { phone, code };
+    if (oldCode) body.oldCode = oldCode;
 
     App.setLoading($('bindBtn'), true, '绑定中');
     const { status, data } = await App.api('/api/auth/phone/bind',
-        { method: 'POST', body: { phone, code }, auth: true });
+        { method: 'POST', body, auth: true });
     App.setLoading($('bindBtn'), false);
 
-    if (data.code === 0) App.toast(`手机号 ${phone} 已写入 user 表`, 'success', '绑定成功');
+    if (data.code === 0) {
+        const masked = phone.slice(0, 3) + '****' + phone.slice(-4);
+        App.toast(`手机号 ${masked} 已写入 user 表`, 'success', oldCode ? '换绑成功' : '绑定成功');
+    }
     else if (status === 401) App.toast('登录已失效，请重新登录', 'error', '未登录');
     else App.toast(data.msg || '绑定失败', 'error', '绑定失败');
 });

@@ -24,7 +24,7 @@ import java.util.regex.Pattern;
  *      {@value #REFRESH_HEADER}，前端收到就替换本地的，从而实现"活跃期间不过期"。
  *
  * 游客放行：只读展示类接口允许游客访问（不校验 token），名单见 {@link #GUEST_READABLE_PATHS}
- *   和 {@link #GUEST_READABLE_PATTERN} —— 例如 GET /api/live/rooms（列表）、GET /api/danmaku（历史弹幕）。
+ *   和 {@link #GUEST_READABLE_PATTERN} —— 例如 GET /api/live/rooms（列表）、GET /api/live/{id}/online（在线人数）。
  *   注意：这里按【方法 + 路径】精确放行，POST /api/live/rooms(创建)、/start、/stop 仍需登录。
  *
  * 哪些接口要登录，在 WebConfig 里配置（白名单：登录/注册不拦）。
@@ -154,7 +154,7 @@ public class JwtInterceptor implements HandlerInterceptor {
      *
      * <p><b>为什么需要这个名单？</b>
      * WebConfig 是按前缀拦截的：{@code /api/live/**}、{@code /api/danmaku/**} 一律要登录。
-     * 但"看直播间列表 / 看在线人数 / 看礼物榜 / 拉历史弹幕"这些<b>浏览行为本身不需要身份</b>，
+     * 但"看直播间列表 / 看在线人数 / 看礼物榜"这些<b>浏览行为本身不需要身份</b>，
      * 一刀切会逼着游客先登录才能看，体验和真实直播站不符。
      *
      * <p>所以这里按【方法 + 精确路径】做白名单，只放行只读接口；
@@ -165,8 +165,11 @@ public class JwtInterceptor implements HandlerInterceptor {
      */
     private static final List<String> GUEST_READABLE_PATHS = List.of(
             "/api/live/rooms",       // 直播间列表（分页 + 分区）
-            "/api/live/recommend",   // 推荐直播间
-            "/api/danmaku"           // 历史弹幕（分页拉取）
+            "/api/live/recommend"    // 推荐直播间
+            // ⚠️ "/api/danmaku" 已移除：历史弹幕接口随"弹幕不落库"一并删掉了，
+            //    现在 /api/danmaku/** 下只剩 POST /ws-ticket，它必须登录。
+            //    未登录用户进直播间后，弹幕面板是空的 —— 这是已知且接受的取舍
+            //    （见 docs/plan/danmaku-no-persist.md）。
     );
 
     /** 带路径参数的游客只读接口：/api/live/{roomId}/online、/api/live/{roomId}/like、/api/live/{roomId}/gift/rank */

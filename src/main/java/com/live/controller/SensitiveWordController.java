@@ -20,7 +20,9 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li>POST /api/sensitive/reload                —— 重新从数据库加载词库（热更新）</li>
  * </ul>
  *
- * <p>业务实际接入点在 {@code DanmakuService.save}（发弹幕前校验），这里只是管理/调试通道。
+ * <p>业务实际接入点在 {@code DanmakuService#checkAndBuild}（发弹幕前校验），这里只是管理/调试通道。
+ * 注意：弹幕已经不落库了，但敏感词校验<b>保留着</b> —— 它现在拦的是"直接推给观众的内容"，
+ * 比落库那会儿更不能少。
  *
  * <h3>权限（本轮修复）</h3>
  * <p>这几个接口原来<b>完全不需要登录</b>（{@code WebConfig} 的拦截范围里没有 {@code /api/sensitive/**}），

@@ -1,69 +1,79 @@
 package com.live.service;
 
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.metadata.IPage;
-import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.live.common.BusinessException;
-import com.live.entity.Danmaku;
-import com.live.mapper.DanmakuMapper;
+import com.live.vo.DanmakuPayload;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
 
 /**
- * 弹幕业务逻辑：
- *   1) 保存弹幕（事务：插入 + 后续广播由 WebSocket 层做）
- *   2) 拉取某直播间历史弹幕（分页，最新在前）
+ * 弹幕业务逻辑：<b>内容审核 + 构造广播载荷</b>。
  *
- * 面试点（为什么 save 加事务）：弹幕落库是"一条写"，单条 SQL 本身是原子的，
- * 但这里用 @Transactional 是为将来扩展留口子——比如"先写库 + 同时改在线人数/统计字段"
- * 这类多写场景，事务能保证"要么全成，要么全回滚"。单条插入加不加其实都可，加了无害。
+ * <h2>职责变更（2026 年本轮改造）</h2>
+ * 原来这个类有两件事：
+ * <ol>
+ *   <li>{@code save(Danmaku)}：DFA 敏感词校验 + <b>INSERT 落库</b>（带 {@code @Transactional}）；</li>
+ *   <li>{@code history(roomId, pageNum, pageSize)}：历史弹幕分页查询。</li>
+ * </ol>
+ * 现在弹幕<b>不再落库</b>（见 {@code docs/plan/danmaku-no-persist.md}）：
+ * 落库、历史查询、{@code DanmakuMapper}、{@code entity.Danmaku} 全部移除，
+ * 本类只保留"审核"这一件事，并顺带负责组装 {@link DanmakuPayload}。
+ *
+ * <h2>为什么这个类不一起删掉</h2>
+ * 敏感词校验曾经藏在 {@code save()} 里，而 {@code save()} 的唯一调用方是
+ * WebSocket 处理器。如果连同 {@code save()} 直接删掉，<b>内容审核会静默消失</b> ——
+ * 而弹幕是直接推给房间内所有观众的，这等于把审核这道闸门整个拆了。
+ *
+ * <p>所以把它单独提出来保留在这里，有两个好处：
+ * <ul>
+ *   <li>WebSocket 处理器只负责"连接管理 + 广播"，审核策略集中在一处，将来换成
+ *       正则 / 词库 / 第三方内容安全接口，只改这里；</li>
+ *   <li>将来如果要用 MQ 做弹幕分发，这个类正好是"校验通过 → 投递"的天然切点。</li>
+ * </ul>
+ *
+ * <h2>为什么没有 {@code @Transactional}</h2>
+ * 本类<b>不碰数据库</b>：DFA 校验是纯内存 Trie 匹配，载荷是普通对象。
+ * 没有事务边界可谈 —— 原来的 {@code @Transactional} 是给那条 INSERT 用的，
+ * 那条 INSERT 已经不存在了。
  */
 @Service
 public class DanmakuService {
 
     @Autowired
-    private DanmakuMapper danmakuMapper;
-
-    @Autowired
     private SensitiveWordService sensitiveWordService;
 
     /**
-     * 保存一条弹幕到数据库（入库前先做 DFA 敏感词校验）。
-     * 广播给直播间内所有在线用户的动作，由 WebSocketHandler 负责（不在这里），
-     * 本方法只负责"持久化"这一件事，职责单一。
+     * 校验弹幕内容并构造广播载荷。
      *
-     * 敏感词校验：命中敏感词 → 抛 BusinessException，由 GlobalExceptionHandler 统一返回
-     * {code:1, msg:包含敏感词...}。过滤策略在这里可改成"替换后放行"（用 filter）或"拒绝"（抛异常）。
+     * <p>校验不通过时抛 {@link BusinessException}，由调用方（WebSocket 处理器）
+     * 捕获后回一条系统提示给发送者，并且<b>不广播</b> —— WebSocket 通道没有
+     * {@code GlobalExceptionHandler} 兜底，这里必须靠抛异常 + 调用方捕获来传递失败。
+     *
+     * @param roomId   直播间 ID（由连接身份决定）
+     * @param userId   发送人 ID（由 Token 决定）
+     * @param nickname 发送人昵称（服务端查库得到）
+     * @param content  弹幕内容（调用方已做过非空 / 长度校验）
+     * @param color    弹幕颜色（调用方已归一化为 #rgb / #rrggbb）
+     * @return 可直接序列化广播的载荷
+     * @throws BusinessException 命中敏感词
      */
-    @Transactional(rollbackFor = Exception.class)
-    public Danmaku save(Danmaku danmaku) {
-        // DFA 敏感词校验：命中即拒绝（走全局异常返回统一提示）
-        String hit = sensitiveWordService.check(danmaku.getContent());
+    public DanmakuPayload checkAndBuild(Long roomId, Long userId, String nickname,
+                                        String content, String color) {
+        // DFA 敏感词校验：命中即拒绝。注意这是"拒绝"语义而不是"替换后放行"，
+        // 因为弹幕是实时推流的，替换后的内容同样会立刻出现在所有人屏幕上。
+        String hit = sensitiveWordService.check(content);
         if (hit != null) {
             throw new BusinessException("包含敏感词: " + hit);
         }
-        danmakuMapper.insert(danmaku);
-        return danmaku;
-    }
 
-    /**
-     * 拉取某直播间历史弹幕（分页）。
-     *
-     * 索引：idx_room_time(room_id, id) 正好覆盖这个查询：
-     *   WHERE room_id = ? 走最左匹配，ORDER BY id DESC 走索引顺序，
-     *   所以既能过滤又能排序，不用 filesort。
-     *
-     * @param roomId   直播间ID
-     * @param pageNum  第几页（从 1 开始）
-     * @param pageSize 每页几条
-     * @return 分页结果（records 当前页，total 总数）
-     */
-    public IPage<Danmaku> history(Long roomId, int pageNum, int pageSize) {
-        Page<Danmaku> page = new Page<>(pageNum, pageSize);
-        LambdaQueryWrapper<Danmaku> wrapper = new LambdaQueryWrapper<Danmaku>()
-                .eq(Danmaku::getRoomId, roomId)
-                .orderByDesc(Danmaku::getId);          // 最新的在前
-        return danmakuMapper.selectPage(page, wrapper);
+        DanmakuPayload payload = new DanmakuPayload();
+        payload.setRoomId(roomId);
+        payload.setUserId(userId);
+        payload.setNickname(nickname);
+        payload.setContent(content);
+        payload.setColor(color);
+        payload.setCreateTime(LocalDateTime.now());
+        return payload;
     }
 }

@@ -28,8 +28,9 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
  *
  * 游客可读的"只读展示类"接口（GET 放行，写在 JwtInterceptor#isGuestReadable 里）：
  *   GET /api/live/rooms、GET /api/live/recommend、GET /api/live/{id}/online、
- *   GET /api/live/{id}/gift/rank、GET /api/danmaku
+ *   GET /api/live/{id}/gift/rank
  *   —— 这些是"看"，不需要身份；而创建/开播/送礼/进房/发弹幕是"写"，仍然必须登录。
+ *   ⚠️ GET /api/danmaku（历史弹幕）已随"弹幕不落库"删除，见 docs/plan/danmaku-no-persist.md。
  */
 @Configuration
 public class WebConfig implements WebMvcConfigurer {

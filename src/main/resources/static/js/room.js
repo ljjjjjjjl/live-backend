@@ -10,7 +10,7 @@
      POST /api/live/{roomId}/leave               离开（在线-1，需 Token；身份取 Token）
      POST /api/live/{roomId}/heartbeat           在线心跳（每 20s 一次；超过 60s 没心跳会被剔出在线集合）
      POST /api/live/{roomId}/gift?value=         送礼（需 Token；收礼者=本房间主播，服务端推导）
-     GET  /api/danmaku?roomId=&pageNum=&pageSize= 历史弹幕
+   ⚠️ 弹幕不落库：没有历史接口（GET /api/danmaku 已删），刷新后面板从空白开始
      POST /api/danmaku/ws-ticket                 换取 WS 握手用的一次性票据（60s，只能用一次）
      WS   /ws/danmaku/{roomId}?ticket=           实时弹幕（票据换取，JWT 不再出现在 URL 里）
    ========================================================= */
@@ -160,21 +160,6 @@ function pushDanmaku(text, who, color, isSys) {
     $('dmStat').textContent = `已收 ${dmCount} 条`;
 }
 
-async function loadHistory() {
-    const { data } = await App.api(`/api/danmaku?roomId=${roomId}&pageNum=1&pageSize=30`);
-    if (data.code !== 0) return;
-    const records = (data.data && data.data.records) || [];
-
-    // 服务端顺序不确定，按 id 升序排一遍，保证左侧是旧、右侧是新
-    records.sort((a, b) => (a.id || 0) - (b.id || 0));
-
-    if (records.length === 0) {
-        pushDanmaku('还没有人发过弹幕，来抢沙发～', null, null, true);
-        return;
-    }
-    records.forEach(d => pushDanmaku(d.content, d.nickname, d.color, false));
-}
-
 /* ==================== WebSocket ==================== */
 let wsRetry = 0;             // 重连次数（指数退避用）
 let wsClosedByUs = false;    // 主动关闭时不要重连
@@ -183,7 +168,7 @@ async function connectWs() {
     if (!App.isLogin()) {
         $('wsPill').textContent = '未登录 · 不能发弹幕';
         $('wsPill').className = 'pill';
-        pushDanmaku('未登录可以看历史弹幕，但连不上实时通道（握手需要身份）', null, null, true);
+        pushDanmaku('未登录不能收发弹幕（握手需要身份），在线人数和礼物榜仍可查看', null, null, true);
         return;
     }
 
@@ -373,11 +358,14 @@ async function heartbeat() {
         return;
     }
     if (!App.isLogin()) {
-        $('giftHint').textContent = '未登录：不能送礼 / 不能发弹幕（历史弹幕可看）';
+        $('giftHint').textContent = '未登录：不能送礼 / 不能发弹幕';
     }
 
     await loadRoomInfo();
-    await Promise.all([refreshOnline(), refreshLike(), loadRank(), loadHistory()]);
+    await Promise.all([refreshOnline(), refreshLike(), loadRank()]);
+
+    // 弹幕不再落库，开屏没有历史可补。补一条系统提示，避免面板空白让人以为页面坏了。
+    pushDanmaku('弹幕不保存历史，刷新后从这里重新开始～', null, null, true);
 
     connectWs();
     await enterRoom(true);          // 静默加入在线列表

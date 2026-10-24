@@ -2,9 +2,9 @@ package com.live.websocket;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.live.common.BusinessException;
-import com.live.entity.Danmaku;
 import com.live.service.DanmakuService;
 import com.live.vo.DanmakuMessage;
+import com.live.vo.DanmakuPayload;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -13,7 +13,6 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
-import java.time.LocalDateTime;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -33,10 +32,17 @@ import java.util.concurrent.ConcurrentHashMap;
  *     避免两条路径交错时把会话挂到一个已被删除的容器上（僵尸会话，收不到任何广播）；
  *   - sendMessage 不是线程安全的，所以多线程广播到同一会话时要按 session 加锁。
  *
- * 为什么"发弹幕"同时要做落库 + 广播两件事？——这就是为什么这一层（而不是纯 Handler）是核心：
- *   落库 → 别人后进直播间能看到历史弹幕；
- *   广播 → 当前在线的人能实时看到新弹幕。
- *   两者要"要么都成功要么都失败"才一致，所以落库方法上加了 @Transactional（见 DanmakuService）。
+ * <h2>弹幕不落库了（本轮改造）</h2>
+ * 原来这里收到一条弹幕后要「先 INSERT 落库、再广播」，落库是为了让后进直播间的人
+ * 能看到历史弹幕。现在这个能力<b>整体移除</b>（见 {@code docs/plan/danmaku-no-persist.md}）：
+ * 处理链变成「校验 → 构造载荷 → 广播」，<b>全程不碰数据库</b>。
+ *
+ * <p>随之消失的还有：历史弹幕接口、服务端代发接口、{@code DanmakuMapper}、
+ * {@code entity.Danmaku}。保留下来的是 DFA 敏感词校验（见 {@link DanmakuService}）——
+ * 它原来藏在落库方法里，如果跟着一起删，审核这道闸门就静默没了。
+ *
+ * <p>⚠️ 副作用（已知并接受）：刷新页面后弹幕面板是空的，没有历史可补。
+ * 弹幕在这个项目里的定位是"瞬时聊天流"，不是可回溯的留言。
  */
 @Slf4j
 @Component
@@ -149,43 +155,37 @@ public class DanmakuWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        // ④ 长度校验：danmaku.content 是 varchar(255)，不拦就会在 insert 时抛
-        //    "Data too long"，用户只会看到"发送失败，请稍后再试"，根本不知道是内容太长。
+        // ④ 长度校验：不拦的话，一条 10 万字的弹幕会被序列化一次、再写给房间里的每一个人
+        //    （广播放大），前端渲染也会卡住。所以即便不再受数据库 varchar(255) 的约束，
+        //    这个上限仍然必须保留 —— 它防的是"广播体积 + 渲染开销"，不是"入库失败"。
         if (content.length() > MAX_CONTENT_LENGTH) {
             sendSystem(session, "弹幕内容不能超过 " + MAX_CONTENT_LENGTH + " 字");
             return;
         }
 
-        // ⑤ 组装实体：
+        // ⑤ 校验 + 组装载荷：
         //    roomId / userId 来自连接身份；
         //    nickname **来自握手时服务端查出来的值**（原来直接取消息体里的 nickname，
-        //    等于任何人都能把昵称写成"主播"或别人的名字，而且会落库、永久留在历史弹幕里）。
-        Danmaku danmaku = new Danmaku();
-        danmaku.setRoomId(roomId);
-        danmaku.setUserId(userId);
-        danmaku.setNickname(nicknameOf(session));
-        danmaku.setContent(content);
-        danmaku.setColor(normalizeColor(data.get("color")));
-        danmaku.setCreateTime(LocalDateTime.now());
-
-        // ① 落库（事务，见 DanmakuService.save）—— 保证后进直播间的人能看到历史
-        //    ⚠️ 必须捕获异常：save 命中敏感词会抛 BusinessException。
+        //    等于任何人都能把昵称写成"主播"或别人的名字）。
+        //    ⚠️ 必须捕获异常：命中敏感词会抛 BusinessException。
         //    REST 通道有 GlobalExceptionHandler 兜底，但 WebSocket 通道【没有】——
         //    异常会冒泡到 Spring 的 WS 层，通常表现为连接被关闭，而用户什么提示都看不到。
         //    所以这里要主动把失败原因回给发送者，并且【不广播】。
+        DanmakuPayload payload;
         try {
-            danmaku = danmakuService.save(danmaku);
+            payload = danmakuService.checkAndBuild(
+                    roomId, userId, nicknameOf(session), content, normalizeColor(data.get("color")));
         } catch (BusinessException e) {
             sendSystem(session, "发送失败：" + e.getMessage());
             return;
         } catch (Exception e) {
-            log.error("弹幕落库失败 roomId={} userId={}", roomId, userIdOf(session), e);
+            log.error("弹幕校验/组装失败 roomId={} userId={}", roomId, userIdOf(session), e);
             sendSystem(session, "发送失败，请稍后再试");
             return;
         }
 
-        // ② 广播给当前直播间所有人 —— 保证在线的人实时能看到
-        broadcastToRoom(roomId, danmaku);
+        // ⑥ 广播给当前直播间所有人 —— 不落库，所以这是这条弹幕唯一的去向
+        broadcastToRoom(roomId, payload);
     }
 
     /**
@@ -241,10 +241,10 @@ public class DanmakuWebSocketHandler extends TextWebSocketHandler {
     /**
      * 广播一条弹幕给某个直播间内的所有在线会话。
      */
-    private void broadcastToRoom(Long roomId, Danmaku danmaku) {
+    private void broadcastToRoom(Long roomId, DanmakuPayload payload) {
         DanmakuMessage msg = new DanmakuMessage();
         msg.setType("CHAT");
-        msg.setData(danmaku);
+        msg.setData(payload);
 
         Map<String, WebSocketSession> sessions = roomSessions.get(roomId);
         if (sessions == null || sessions.isEmpty()) return;

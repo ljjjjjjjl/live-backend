@@ -1,6 +1,7 @@
 package com.live.util;
 
 import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.JwtParser;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.security.Keys;
@@ -33,6 +34,40 @@ import java.util.Date;
  * <p>但这样会带来一个新问题——只要用户一直点，Token 就一直换，会话**永不结束**。
  * 所以 Token 里额外记了一个 {@code loginAt}（首次登录时间），续期时**原样带过去**，
  * 服务端据此算出"这个会话总共活了多久"，超过绝对上限就不再续期，强制重新登录。
+ *
+ * <h2>⚠️ 性能：解析器和密钥必须复用，不能每个请求 new（压测定位出来的真瓶颈）</h2>
+ * <p>改造前每次解析都写成了一条链：
+ * <pre>
+ *   Jwts.parserBuilder().setSigningKey(getKey()).build().parseClaimsJws(token)
+ * </pre>
+ * 这条链每次调用都会<b>新建一个 parser</b>，而 {@code build()} 内部要初始化 JSON 序列化器
+ * （Jackson ObjectMapper）。ObjectMapper 的构造是毫秒级的 —— 它要注册模块、构建
+ * SerializerProvider/DeserializerCache 等一整套东西。于是「验一个 200 字节的 HMAC」
+ * 这个本该几十微秒的操作，实际要花 <b>约 4ms</b>。
+ *
+ * <p>实测依据（单机压测，逐层对照摘出来的）：
+ * <table border="1">
+ *   <tr><th>请求</th><th>是否验签</th><th>P50</th></tr>
+ *   <tr><td>GET /api/live/{room}/online（游客放行，只读一次 Redis）</td>
+ *       <td>否</td><td>1.56 ms</td></tr>
+ *   <tr><td>GET /api/live/__probe__（要登录，验签通过后 404，无任何业务逻辑）</td>
+ *       <td>是</td><td>5.08 ms</td></tr>
+ *   <tr><td>GET /api/live/__probe__ 不带 Token（拦截器立刻打回）</td>
+ *       <td>否</td><td>0.75 ms</td></tr>
+ * </table>
+ *
+ * <p>「验签通过但什么业务都不做」比「游客放行且要读 Redis」还慢 3.5ms ——
+ * 唯一的差别就是验签，所以这 3.5ms 只能是解析器构造的开销。
+ * 它同时也是整个接口的吞吐瓶颈：并发 50 / 200 / 600 三档压下来吞吐都在 1250~1360，
+ * 完全不随并发变化，说明瓶颈是「串行/CPU 密集的单次开销」，而不是排队。
+ *
+ * <p>修法就是把这两样东西各建一次然后复用：
+ * <ul>
+ *   <li>{@link Key}：由 secret 派生，内容永远不变；</li>
+ *   <li>{@link JwtParser}：jjwt 的 Parser 构造后是<b>不可变</b>的，官方说明可多线程共享。</li>
+ * </ul>
+ * 两者都用「懒初始化 + 双重检查」：因为它们依赖 {@code @Value} 注入的字段，
+ * 注入发生在构造之后，所以不能在构造函数里初始化。
  */
 @Component
 public class JwtUtil {
@@ -46,9 +81,54 @@ public class JwtUtil {
     @Value("${jwt.expire}")
     private long expire;
 
-    /** 根据配置的 secret 生成签名密钥（HS256 要求 ≥32 字节） */
+    /**
+     * 缓存的签名密钥。
+     * 加 volatile + 双重检查：多线程同时第一次访问时只会真的创建一次，
+     * 之后的读写不再加锁（本方法在每秒上千次的热路径上，不能每次都进 synchronized）。
+     */
+    private volatile Key cachedKey;
+
+    /**
+     * 缓存的解析器。
+     * 这是本类最重要的一个字段 —— 它的构造占了整个接口一半以上的耗时（见类注释）。
+     */
+    private volatile JwtParser cachedParser;
+
+    /** 根据配置的 secret 生成签名密钥（HS256 要求 ≥32 字节）。<b>只创建一次</b>，之后复用 */
     private Key getKey() {
-        return Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+        Key k = cachedKey;
+        if (k == null) {
+            synchronized (this) {
+                k = cachedKey;
+                if (k == null) {
+                    k = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+                    cachedKey = k;
+                }
+            }
+        }
+        return k;
+    }
+
+    /**
+     * 取共享的解析器。<b>只创建一次</b>，之后复用。
+     *
+     * <p>jjwt 的 {@link JwtParser} 构造完成后是不可变对象，可以安全地被多个线程同时调用，
+     * 所以这里用单例即可，不需要 ThreadLocal。
+     */
+    private JwtParser getParser() {
+        JwtParser p = cachedParser;
+        if (p == null) {
+            synchronized (this) {
+                p = cachedParser;
+                if (p == null) {
+                    p = Jwts.parserBuilder()
+                            .setSigningKey(getKey())
+                            .build();
+                    cachedParser = p;
+                }
+            }
+        }
+        return p;
     }
 
     /**
@@ -65,6 +145,10 @@ public class JwtUtil {
      *
      * <p>为什么不直接用当前时间当 loginAt？那样每次续期都会"重新开始计时"，
      * 会话就永远没有尽头了。沿用首次登录时间，服务端才能判断"这个会话活了多久"。
+     *
+     * <p>注意：签发这条路仍然每次 {@code new} 一个 builder（jjwt 的 builder 是有状态的，
+     * 不能跨请求复用），但签发只在登录和"临近过期"时发生，不在每个请求的热路径上；
+     * 热路径上是 {@link #parseClaims}，那条路已经复用了解析器。
      *
      * @param loginAt 首次登录时间戳（毫秒）
      */
@@ -90,11 +174,7 @@ public class JwtUtil {
             return null;
         }
         try {
-            return Jwts.parserBuilder()
-                    .setSigningKey(getKey())
-                    .build()
-                    .parseClaimsJws(token)
-                    .getBody();
+            return getParser().parseClaimsJws(token).getBody();
         } catch (Exception e) {
             // 过期 / 签名不对 / 被篡改 统统当无效
             return null;

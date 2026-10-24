@@ -94,26 +94,9 @@ public class VideoLikeService {
     /** 「我点过赞的视频」最多返回多少条（见 {@link #likedVideoIds} 的说明） */
     private static final int LIKED_IDS_LIMIT = 500;
 
-    /**
-     * 「存在则原子累加、不存在则让调用方去重建」的 Lua 脚本。
-     *
-     * <p><b>为什么必须用 Lua？</b> 原来的写法是 Java 里分两步：
-     * <pre>
-     *   if (hasKey(key)) increment(key, delta); else rebuild(key);
-     * </pre>
-     * {@code hasKey} 和 {@code increment} 之间是两次独立往返，中间 key 一旦消失，
-     * 就会走错分支（或对空 key 从 0 起算）。Lua 在 Redis 单线程里执行，
-     * 「判断 + 累加」是一次原子操作，窗口被彻底消除。
-     *
-     * <p>返回 -1 = key 不存在，交给 {@link #applyDelta} 用数据库真值回填。
-     * （计数不可能为负：取消点赞有"行数门控"，见 {@link #unlike}，所以 -1 可安全当哨兵。）
-     */
-    private static final DefaultRedisScript<Long> INCR_IF_EXISTS_SCRIPT = new DefaultRedisScript<>("""
-            if redis.call('EXISTS', KEYS[1]) == 1 then
-                return redis.call('INCRBY', KEYS[1], ARGV[1])
-            end
-            return -1
-            """, Long.class);
+    // 计数相关的 Redis 操作（含 INCR_IF_EXISTS_SCRIPT 原子脚本）已整体搬进
+    // {@link VideoLikeCountStore} —— 因为 MQ 打开后消费线程也要用同一套逻辑，
+    // 留在这里会让同步实现反过来依赖本类，形成循环依赖。
 
     /**
      * 计数缓存的过期策略：<b>永不过期（不设 TTL）</b>。
@@ -165,6 +148,13 @@ public class VideoLikeService {
     @Autowired
     private LikeReconcileService likeReconcileService;
 
+    /**
+     * 派生计数（Redis {@code video:like:count:{id}}）的唯一读写入口。
+     * 查询与"捂热"都委托给它，本类不再直接操作那个 key。
+     */
+    @Autowired
+    private VideoLikeCountStore videoLikeCountStore;
+
     /* ==================================================================
        点赞 / 取消点赞
        ================================================================== */
@@ -202,12 +192,13 @@ public class VideoLikeService {
         // ④ 只有真正新增才 +1 —— 这是"不重复计数"的关键。
         //    ⚠️ 事务已提交，这里才动 Redis / MQ：DB 若回滚就不会多加一个赞，
         //       而 Redis 的网络抖动也不会占着数据库连接。
-        //    ⑤ 顺手把 videoId 标进"脏集合"：派生列 video.like_count 现在肯定和权威表对不上了，
-        //       交给 LikeCountReconcileTask 定点修正（不用再全表扫）。
+        //    ⑤ 增量交给 LikeCountPublisher 这个出口：
+        //       · MQ 关闭（默认）→ SyncLikeCountPublisher 当场算进 Redis + 标脏，行为与改造前完全一致
+        //       · MQ 打开        → RocketLikeCountPublisher 发一条顺序消息，由消费者异步算
+        //       把"算"和"标脏"一起搬进实现里，是为了保证两者永远成对出现 —— 之前它们是
+        //       散在本方法里的三行代码，任何一行被漏掉都会让计数或对账悄悄失效。
         if (Boolean.TRUE.equals(inserted)) {
-            applyDelta(videoId, 1L);
             likeCountPublisher.publishVideoLikeDelta(videoId, 1L);
-            likeReconcileService.markDirty(videoId);
         }
 
         return new LikeResultVO(true, getLikeCount(videoId));   // 读 Redis，仍在事务外
@@ -268,9 +259,8 @@ public class VideoLikeService {
 
         // 事务外：拿提交后的真实影响行数做"行数门控"，再动 Redis / MQ
         if (deleted != null && deleted > 0) {
-            applyDelta(videoId, -1L);
+            // 与 like() 对称：算进 Redis + 标脏都由发布者统一负责（同步或异步）
             likeCountPublisher.publishVideoLikeDelta(videoId, -1L);
-            likeReconcileService.markDirty(videoId);   // 派生列可能对不上了，标脏交给对账
         } else {
             log.debug("用户 {} 取消点赞视频 {} 时并无点赞记录，幂等返回", userId, videoId);
         }
@@ -294,19 +284,7 @@ public class VideoLikeService {
      * —— 因为后者是异步刷回的派生值，可能是旧的。
      */
     public long getLikeCount(Long videoId) {
-        String key = LIKE_COUNT_KEY + videoId;
-
-        String cached = stringRedisTemplate.opsForValue().get(key);
-        if (cached != null) {
-            try {
-                return Long.parseLong(cached);
-            } catch (NumberFormatException e) {
-                // 缓存里被写入了非法值（人为误操作等）→ 删掉当未命中处理，别让脏值一直返回
-                log.warn("点赞计数缓存值非法，key={}, value={}，已清除", key, cached);
-                stringRedisTemplate.delete(key);
-            }
-        }
-        return rebuildCount(videoId);
+        return videoLikeCountStore.getLikeCount(videoId);
     }
 
     /**
@@ -344,74 +322,18 @@ public class VideoLikeService {
     }
 
     /**
-     * 从权威表 user_like 重算并回填 Redis。
-     *
-     * <p>⚠️ <b>不带 TTL</b>（原来写的是 {@code set(key, value, COUNT_TTL)}，2026-09-14 已去掉）：
-     * 见 {@link #INCR_IF_EXISTS_SCRIPT} 上方的「为什么计数类缓存不能设 TTL」。
-     */
-    private long rebuildCount(Long videoId) {
-        Long cnt = userLikeMapper.selectCount(new LambdaQueryWrapper<UserLike>()
-                .eq(UserLike::getVideoId, videoId));
-        long value = cnt == null ? 0L : cnt;
-        stringRedisTemplate.opsForValue().set(LIKE_COUNT_KEY + videoId, String.valueOf(value));
-        return value;
-    }
-
-    /**
      * 缓存未命中时，用「<b>当前</b>数据库真实计数」把 Redis 计数捂热。
      *
-     * <p>⚠️ <b>必须在修改数据库之前调用！</b> 这是一个非常容易踩的坑：
-     * 重建计数靠的是 {@code SELECT COUNT(*)}，如果等 INSERT/DELETE 做完再重建，
-     * 那次 COUNT 反映的已经是<b>改完之后</b>的数字，再叠加 ±1 就会：
-     * <ul>
-     *   <li>点赞时 → 重复计数（多算 1）</li>
-     *   <li>取消时 → 重复递减（少算 1）</li>
-     * </ul>
-     * 这个偏差一旦留下就很难发现 —— 属于"测试不仔细就看不出来"的隐蔽 bug。
+     * <p>⚠️ <b>必须在修改数据库之前调用！</b> 重建计数靠的是 {@code SELECT COUNT(*)}，
+     * 如果等 INSERT/DELETE 做完再重建，那次 COUNT 反映的已经是<b>改完之后</b>的数字，
+     * 再叠加 ±1 就会重复计数（点赞多算 1、取消少算 1）——
+     * 这个偏差很难发现，属于"测试不仔细就看不出来"的隐蔽 bug。
      *
-     * <p>那为什么还要"捂热"而不是让 {@code INCRBY} 自己从 0 开始？因为 {@code INCRBY} 对
-     * <b>不存在的 key 会从 0 起算</b>：某视频真实有 5 个赞，缓存缺失时一个人点赞，
-     * 直接 INCR 会得到 1 而不是 6。
-     *
-     * <p>和 {@link #applyDelta} 的分工（"快路径 + 慢路径"）：
-     * 这里是<b>常态快路径</b>，保证 key 存在、且基准值正确；
-     * {@code applyDelta} 里 Lua 返回 -1 的分支是<b>异常慢路径</b>，只处理
-     * "Redis 重启 / flush 导致 key 在两步之间消失"这种运维级情况。
+     * <p>具体实现与"为什么不能直接 INCRBY 从 0 起算"，见
+     * {@link VideoLikeCountStore#warmCountIfAbsent(Long)}。
      */
     private void warmCountIfAbsent(Long videoId) {
-        String key = LIKE_COUNT_KEY + videoId;
-        if (Boolean.TRUE.equals(stringRedisTemplate.hasKey(key))) {
-            return;
-        }
-        rebuildCount(videoId);
-    }
-
-    /**
-     * 给计数加减 delta（原子）。
-     *
-     * <p><b>实现要点（2026-09-14 改造）</b>：
-     * <ol>
-     *   <li><b>原子</b>：用 Lua 把"判断 key 是否存在 + INCRBY"合并成一次操作，
-     *       不再有 {@code hasKey} 与 {@code increment} 之间的竞态窗口；</li>
-     *   <li><b>不再续 TTL</b>：删掉了原来的 {@code expire(key, COUNT_TTL)} —— 那正是
-     *       "热 key 永不过期、算错不自愈"的根因；</li>
-     *   <li><b>缺失时用数据库真值兜底</b>：本方法是在<b>数据库已经改完之后</b>被调用的，
-     *       所以此刻数据库的计数<b>就是</b>正确的当前值 → 直接回填，
-     *       <b>绝不能再叠加 delta</b>（否则就是上面那个重复计数 bug）。</li>
-     * </ol>
-     */
-    private void applyDelta(Long videoId, long delta) {
-        String key = LIKE_COUNT_KEY + videoId;
-
-        Long result = stringRedisTemplate.execute(
-                INCR_IF_EXISTS_SCRIPT, List.of(key), String.valueOf(delta));
-
-        if (result == null || result < 0) {
-            // 走到这里说明 key 在"捂热"之后消失了（Redis 重启/flush 等运维级异常）。
-            // 注意：这是"慢路径"兜底，重建的是改库之后的真值，不叠加 delta。
-            log.warn("点赞计数 key 缺失，按键数据库真值重建：videoId={}, delta={}", videoId, delta);
-            rebuildCount(videoId);
-        }
+        videoLikeCountStore.warmCountIfAbsent(videoId);
     }
 
     /** 视频必须存在，避免用户给一个不存在的 ID 点赞制造脏数据 */

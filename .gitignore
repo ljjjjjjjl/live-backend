@@ -24,6 +24,13 @@ logs/
 # ---- 本地数据库备份（内含真实数据，绝对不要提交）----
 .dbbackup/
 
+# ---- 压测产物（内含已登录账号的 JWT，绝不能进仓库）----
+.like-tokens.json
+.like-tokens*.json
+
+# ---- RocketMQ 本地运行目录（commitlog 等大文件）----
+.tmp/
+
 # ---- 与本项目无关的本机工具目录 ----
 atrust_repair/
 

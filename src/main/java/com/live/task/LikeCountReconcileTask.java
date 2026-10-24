@@ -14,11 +14,12 @@ import org.springframework.stereotype.Component;
  * 点赞的数据流是"<b>权威同步写 + 派生态异步刷回</b>"：
  * <pre>
  *   点一次赞 ──► user_like 表（同步，绝不丢）
- *            └─► Redis 计数（同步，用于展示）
- *            └─► MQ 消息（异步）──► 消费者 UPDATE video.like_count   ← 这一步还没实现
+ *            └─► Redis 计数（同步或 MQ 异步，用于展示）
+ *            └─► 脏集合标记 → 本任务 UPDATE video.like_count
  * </pre>
- * 因为 MQ 还没接入（{@code NoopLikeCountPublisher} 是空实现），{@code video.like_count}
- * 目前<b>没有任何东西实时更新它</b>，于是用对账顶上空缺。
+ * {@code video.like_count} 这一列<b>没有任何东西实时更新它</b>，
+ * 它是"聚合结果"，允许延迟，于是用对账顶上空缺 —— 消息丢了、消费者挂了、服务重启了，
+ * 最终都由这里把数据库那一列拉回正确值。
  *
  * <p>对账的定义：只要是"异步/缓存"的数据流，就一定会因为消息丢失、消费者异常、服务重启、
  * 并发覆盖产生偏差，所以必须有一个"<b>以权威源为准，定期把派生数据拉回一致</b>"的兜底任务。

@@ -15,7 +15,12 @@
       （`add/remove` 由 **O(n) 复制整个数组** 降为 **O(1)**）；建连/断连统一 `compute` 保证"建容器 + 增删 + 空了删 key"原子；
       广播遍历 `values()` 用弱一致迭代器**边遍历边清理死连接**；**新增 `handleTransportError`**（日志 + `removeSession` + `close(SERVER_ERROR)`）兜底；
       三处清理共用幂等 `removeSession(roomId, session)`
-- [x] 弹幕表 `danmaku` + 历史查询（分页 `/api/danmaku?roomId=`）+ 服务端代发
+- [x] ~~弹幕表 `danmaku` + 历史查询（分页 `/api/danmaku?roomId=`）+ 服务端代发~~
+      → **已移除**：弹幕改为**不落库**（`docs/plan/danmaku-no-persist.md`）。
+      处理链变成「DFA 校验 → 构造载荷 → 广播」，`GET /api/danmaku`、`POST /api/danmaku`、
+      `DanmakuMapper`、`entity.Danmaku` 全部删除；DFA 敏感词校验**保留**（迁到
+      `DanmakuService#checkAndBuild`），因为弹幕是直接推给所有观众的，这道闸门不能跟着落库一起没。
+      表与建表脚本仍保留，只停写不删表。
 - [x] JWT 登录鉴权（`/create`、`/start`、`/stop`、发弹幕均从 Token 取身份）+ 滑动续期
 - [x] 游客可读白名单（只读接口按"读/写"授权，不再按路径前缀一刀切）
 - [x] 参数校验 + 统一异常处理（`@Valid` + `GlobalExceptionHandler`）
@@ -104,11 +109,26 @@
   - 建议改法与点赞一致：用 `TransactionTemplate` 只包"查/建用户 / updateById"，
     `verify`（校验）放事务前、`clear`（用后即焚）放**事务提交后** —— 顺带修掉一个隐患：
       现在 `clear` 在事务内，Redis 操作**不参与回滚**，若 DB 之后失败，验证码已经被烧掉了
-- [ ] 去掉 `requireVideoExists` 的 `selectById`（改本地缓存）
-- [ ] 直播间点赞上报里的"房间是否存在"校验也是每次一次 PK 查询 —— 前端已攒批（500ms 一次）量级可接受，
-      再往上可以本地缓存，和上一条同源
+- [x] ~~去掉 `requireVideoExists` 的 `selectById`（改本地缓存）~~
+      ⚠️ 只做了一半：**直播间**点赞那条已改（`RoomExistsCache`，命中 60s / 未命中 10s），
+      视频侧 `requireVideoExists` 仍是每请求一次 `selectById`，待做
+- [x] ~~直播间点赞上报里的"房间是否存在"校验也是每次一次 PK 查询~~
+      ✅ 已改 `RoomExistsCache`。但压测数据显示：**这一项不是吞吐瓶颈**
+      （加上缓存后吞吐 1283 → 1297，在噪声内），它真正的收益是把数据库压力
+      从每秒上千次查询降到接近 0。当时真正卡住吞吐的是 JWT 解析器每请求重建，见下一条
+- [x] ~~定位并修复「JWT 验签每请求重建解析器」~~
+      ✅ `JwtUtil` 原来每个请求都 `Jwts.parserBuilder().build()`，内部重新初始化
+      Jackson ObjectMapper，把几十微秒的验签拖成约 3.5ms。改为 `Key` + `JwtParser`
+      懒初始化单例复用后，直播间人气接口吞吐 **1362 → 2838 QPS（2.08×）**，P50 145 → 61ms
 - [ ] 预检改**乐观插入**（直接 `INSERT` + catch `DuplicateKeyException`，省一次 SELECT）
-- [ ] 接入 **RabbitMQ**，用 `LikeCountPublisher` 攒批异步刷回 `video.like_count`（接口已留好，换实现即可）
+- [x] ~~接入 **RabbitMQ**，用 `LikeCountPublisher` 攒批异步刷回 `video.like_count`~~
+      ✅ **已接入 RocketMQ（2026-10-24）**：`RocketLikeCountPublisher` + `VideoLikeCountConsumer`，
+      按 videoId 发顺序消息、消费端用 messageId 做 SETNX 幂等去重、发送失败降级为同步直算。
+      用 `app.mq.enabled` 开关，**默认关闭**（关闭时走 `SyncLikeCountPublisher`，行为与改造前一致）。
+      启动：`mvn spring-boot:run -Dspring-boot.run.profiles=dev,mq`
+      已验证：20 次点赞 → Redis / user_like / video.like_count 三处均为 +20，零丢失零重复。
+      仍待做：① 攒批合并（现在是「一次点赞一条消息」，还没做批量化）；
+      ② 消费端目前只算 Redis 计数，`video.like_count` 仍靠对账刷回（有意为之，见下方两条待办）
 - [ ] 推荐接口升级：「已看集合放 Redis + 推荐结果短缓存」
 - [ ] 推荐 `NOT IN` 改 `NOT EXISTS` / `LEFT JOIN ... IS NULL`
 - [ ] **废弃 `/api/count/**`**（早期演示接口：无鉴权、无判重，已被正式点赞接口取代）—— ⏳ 待决定

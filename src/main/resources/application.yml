@@ -125,10 +125,22 @@ app:
     max-verify-attempts: 5           # 同一验证码最大连续校验失败次数，超过即作废
     verify-attempt-window-minutes: 5 # 失败计数的窗口
 
+  # 消息队列（RocketMQ）：决定「派生计数」在哪儿算
+  #   false（默认）= SyncLikeCountPublisher   → 请求线程里直接把增量算进 Redis，接口立即返回最新值
+  #   true          = RocketLikeCountPublisher → 发一条顺序消息，消费者异步算（接口返回值可能滞后几毫秒）
+  #
+  # 打开它还需要同时激活 mq profile（那里配 rocketmq.name-server；不激活则 RocketMQ 自动配置不生效）：
+  #   mvn spring-boot:run -Dspring-boot.run.profiles=dev,mq
+  #
+  # 为什么默认关：MQ 属于外部依赖，一台没装 RocketMQ 的机器不该因为点赞功能起不来。
+  # 关闭时行为与接入 MQ 之前**完全一致**，所以这个开关是纯增量的，不影响任何已有测试。
+  mq:
+    enabled: false
+
   # 视频点赞相关（第 4 周：权威同步写 + 派生态异步刷回）
   like:
     # 对账开关。开启后由 LikeCountReconcileTask 把 video.like_count 校正为
-    # 权威表 user_like 的真实计数。MQ 未接入期间，这是保证数据最终一致的兜底手段。
+    # 权威表 user_like 的真实计数。无论 MQ 开还是关，这都是最后一道兜底。
     reconcile-enabled: true
 
     # ── ① 脏集合对账（主力，2026-10-07 新增）─────────────────────────────

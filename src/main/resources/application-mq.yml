@@ -1,0 +1,40 @@
+# ============================================================================
+# mq profile：打开 RocketMQ 异步链路
+#
+# 启动方式（dev + mq 两个 profile 一起激活）：
+#     mvn spring-boot:run -Dspring-boot.run.profiles=dev,mq
+#
+# 前置：先起 NameServer 和 Broker
+#     cd D:\rocketmq\rocketmq-all-5.5.1-bin-release\bin
+#     mqnamesrv.cmd
+#     mqbroker.cmd -n 127.0.0.1:9876 -c D:\nodejs\workspace\live-backend\docs\rocketmq\broker.conf
+#   （broker.conf 就在仓库的 docs/rocketmq/ 下，换机器只需改里面的 storePathRootDir）
+#
+# 为什么把 RocketMQ 的连接配置单独放进 profile，而不是放主 application.yml：
+#   rocketmq-spring-boot-starter 的自动配置是「看到 rocketmq.name-server 才生效」。
+#   如果把 name-server 写进主配置，那么**没开 MQ 的机器**也会去建生产者、
+#   去连一个根本不存在的 NameServer，启动日志一片报错。
+#   放进独立 profile，不激活 mq 时这块配置压根不存在，RocketMQ 完全不初始化。
+# ============================================================================
+
+app:
+  mq:
+    enabled: true
+
+rocketmq:
+  # NameServer 地址（多个用分号隔开，如 10.0.0.1:9876;10.0.0.2:9876）
+  name-server: ${ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+
+  producer:
+    # 生产者组：同一组内的生产者共享发送路由信息
+    group: live-like-delta-producer
+    # 单条消息发送超时（毫秒）。超时会走 RocketLikeCountPublisher 里的"降级同步直算"分支
+    send-message-timeout: 3000
+
+# 消费端日志：把 MQ 客户端自己的心跳/路由日志压到 warn，
+# 否则每 30 秒一次心跳会把业务日志刷没
+logging:
+  level:
+    org.apache.rocketmq: warn
+    RocketmqClient: warn
+    RocketmqCommon: warn

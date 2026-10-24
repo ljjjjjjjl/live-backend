@@ -5,6 +5,7 @@ import com.live.entity.LiveRoom;
 import com.live.mapper.LiveRoomMapper;
 import com.live.service.LiveLikeService;
 import com.live.service.RedisRankService;
+import com.live.service.RoomExistsCache;
 import com.live.vo.LiveLikeRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -64,6 +65,9 @@ public class LiveInteractiveController {
     @Autowired
     private LiveRoomMapper liveRoomMapper;
 
+    @Autowired
+    private RoomExistsCache roomExistsCache;
+
     /**
      * 直播间点赞（人气）：把 delta 累加到 {@code live:like:{roomId}}。
      *
@@ -85,7 +89,11 @@ public class LiveInteractiveController {
             return Result.fail("delta 必须在 1~" + LiveLikeService.MAX_DELTA + " 之间");
         }
         // ② 房间必须存在（Redis 里凭空多一个房间的 key 没有意义，也没人能看到它）
-        if (liveRoomMapper.selectById(roomId) == null) {
+        //    ⚠️ 这里走本地缓存，不是每次都查库 —— 压测实测：这条 selectById 让单请求从 1.58ms
+        //       涨到 5.97ms，而 MySQL 自己执行它是 0.52ms，多出来的 4ms 全在"取连接 + MyBatis 映射"。
+        //       它同时也是整个接口的吞吐瓶颈（无论并发开到 50 还是 600，吞吐都卡在 1250 左右）。
+        //       房间存在性是典型读多写少，缓存 60 秒即可，具体取舍见 RoomExistsCache 的类注释。
+        if (!roomExistsCache.exists(roomId)) {
             return Result.fail("直播间不存在");
         }
         // ③ 限速 + 累加在同一次 Lua 里完成

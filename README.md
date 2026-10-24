@@ -25,9 +25,9 @@
 
 | 规模 | 数量 |
 |---|---|
-| REST 接口 | **32 个** + 1 个 WebSocket 通道 |
+| REST 接口 | **30 个** + 1 个 WebSocket 通道 |
 | 数据表 | **11 张**（其中收藏 / 转发 / 评论 4 张为设计储备，功能未实现） |
-| Java 源文件 | 78 个主代码 + 6 个测试类（34 个测试用例） |
+| Java 源文件 | 77 个主代码 + 6 个测试类（34 个测试用例） |
 | 演示页面 | 6 个（原生 HTML/CSS/JS，启动即可访问） |
 
 ## 功能清单
@@ -50,6 +50,9 @@
 - [x] 礼物榜：ZSet（`ZINCRBY` / `ZREVRANGE WITHSCORES`）
 - [x] 直播间人气：`INCRBY` + **Lua 限速（20 次/秒）**，开播归零、关播结算写回 MySQL
 - [x] 弹幕：WebSocket 分房间广播，握手用**一次性票据**换连接，异常回执而非静默失败
+- [x] 弹幕**不落库**（本轮改造）：处理链是「DFA 校验 → 构造载荷 → 广播」，不碰数据库；
+      历史弹幕接口与「服务端代发」接口随之删除，但 DFA 敏感词校验**保留**
+      （见 `docs/plan/danmaku-no-persist.md`）
 
 **视频与点赞**
 - [x] 视频推荐（分类召回 + 热度排序 + 排除已看 + 冷启动兜底）
@@ -209,7 +212,7 @@ mvn spring-boot:run -Dspring-boot.run.profiles=dev
 | POST | `/api/danmaku/ws-ticket` | 换 WS 握手票据（60s、一次性） |
 | WS | `/ws/danmaku/{roomId}?ticket=` | 实时弹幕（兼容 `?token=`） |
 
-**视频与弹幕**
+**视频推荐与点赞**
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -218,8 +221,9 @@ mvn spring-boot:run -Dspring-boot.run.profiles=dev
 | DELETE | `/api/video/{videoId}/like` | 取消点赞（幂等） |
 | GET | `/api/video/{videoId}/like` | 点赞状态 + 总数 |
 | GET | `/api/video/liked-ids` | 我赞过的视频 ID |
-| GET | `/api/danmaku` | 历史弹幕（分页）· 游客可读 |
-| POST | `/api/danmaku` | 服务端代发弹幕（经 DFA 过滤；昵称由服务端查库，不采信前端） |
+
+> 历史弹幕 `GET /api/danmaku` 与「服务端代发」`POST /api/danmaku` 已随**弹幕不落库**删除。
+> 现在 `/api/danmaku` 前缀下只剩 `POST /api/danmaku/ws-ticket`（见上「实时互动」）。
 
 **调试 / 管理**（均需登录）
 
@@ -235,12 +239,12 @@ mvn spring-boot:run -Dspring-boot.run.profiles=dev
 src/main/java/com/live/
 ├── common/      统一返回体、业务异常、全局异常处理、DFA 敏感词过滤器、手机号脱敏、用户状态
 ├── config/      JWT 拦截器、WebSocket 配置、MyBatis-Plus 分页、密码编码器、短信配置与校验
-├── controller/  10 个 Controller（32 个接口）
-├── entity/      user / video / user_like / live_room / danmaku / sensitive_word ...
+├── controller/  10 个 Controller（30 个接口）
+├── entity/      user / video / user_like / live_room / sensitive_word ...（danmaku 已移除）
 ├── mapper/      MyBatis-Plus Mapper（含推荐与对账 SQL）
-├── service/     业务层（点赞、直播、推荐、弹幕、敏感词、短信、验证码、WS 票据）
+├── service/     业务层（点赞、直播、推荐、弹幕校验、敏感词、短信、验证码、WS 票据）
 ├── task/        点赞计数定时对账 + 在线人数回写
-├── vo/          视图对象（请求 DTO + 返回 VO）
+├── vo/          视图对象（请求 DTO + 返回 VO，含 WS 弹幕载荷 DanmakuPayload）
 └── websocket/   弹幕握手拦截器 + 分房间处理器
 
 src/main/resources/
@@ -252,9 +256,20 @@ src/main/resources/
 
 > 如实说明，避免误解。这些也是项目下一步的方向。
 
+- **弹幕不落库（本轮改造，已知取舍）**：弹幕定位为「瞬时聊天流」，不走数据库。代价是
+  ① 刷新页面后弹幕面板从空白开始，没有历史可补；② 未登录用户收不到任何弹幕
+  （握手需要身份，原来还能靠历史接口看）；③ 没有「服务端代发弹幕」通道
+  （那个接口原本只落库、不广播，落库取消后失去意义）。
+  `danmaku` 表与建表脚本仍在仓库里，但代码已不再写入。详见 `docs/plan/danmaku-no-persist.md`。
+
 - **不碰音视频**：视频采集与推流由前端负责（`getUserMedia` / OBS / SRS），后端只做**直播间状态 + 实时文字互动**。
-- **MQ 未接入**：点赞的异步刷回只留了 `LikeCountPublisher` 接口 + `NoopLikeCountPublisher` 空实现，
-  `video.like_count` 目前完全靠**两级对账**兜底（脏集合 30 秒一轮 + 每天凌晨全量兜底，见「核心设计 §4」）。
+- **MQ 已接入但是【默认关闭】**：`LikeCountPublisher` 有两个实现，靠 `app.mq.enabled` 二选一
+  （详见「核心设计 §5」）：
+  - `false`（默认）→ `SyncLikeCountPublisher`，在请求线程里同步算 Redis 计数，行为与接入前完全一致；
+  - `true` → `RocketLikeCountPublisher`，发一条**按 videoId 分区的顺序消息**，由
+    `VideoLikeCountConsumer` 异步算（带 messageId 幂等去重），接口返回值可能滞后几毫秒。
+  打开方式：`mvn spring-boot:run -Dspring-boot.run.profiles=dev,mq`（`mq` profile 负责配 NameServer）。
+  不管开还是关，`video.like_count` 都由**两级对账**兜底刷回（脏集合 30 秒一轮 + 每天凌晨全量）。
 - **收藏 / 转发 / 评论**：表已建，功能未实现（设计储备）。
 - **礼物榜只在 Redis**：`gift:rank:{roomId}` 未落库，Redis 淘汰即永久丢失；方案是补礼物流水表 + 异步落库。
 - **WebSocket 会话表在单机内存**，多机部署需要换成 Redis Pub/Sub 或 MQ 广播。

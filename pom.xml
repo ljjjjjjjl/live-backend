@@ -95,6 +95,18 @@
             <optional>true</optional>
         </dependency>
 
+        <!-- RocketMQ（异步化：「权威表同步写 + 派生计数异步刷」）
+             ⚠️ 版本必须 ≥ 2.3.x：2.2.x 只有 META-INF/spring.factories，
+                缺少 Spring Boot 3 需要的 META-INF/spring/...AutoConfiguration.imports，
+                在 Boot 3 上会**静默不自动装配**（既没报错、也没 RocketMQTemplate，
+                表现是注入到 null 之后运行时才炸）。
+             另外它内部的 spring-boot* 依赖都是 optional，所以不会把 Boot 版本拖回 2.x。 -->
+        <dependency>
+            <groupId>org.apache.rocketmq</groupId>
+            <artifactId>rocketmq-spring-boot-starter</artifactId>
+            <version>2.3.6</version>
+        </dependency>
+
         <!-- 测试依赖（本轮为安全验收新增）：JUnit5 + AssertJ + MockMvc + spring-test。
              此前项目**完全没有测试依赖**（src/test 目录都不存在），安全修复必须有回归测试兜底，
              否则"验证码只能消费一次""封禁用户登录被拒绝"这类性质无法被证明。

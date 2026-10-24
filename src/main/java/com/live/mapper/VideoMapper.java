@@ -97,7 +97,9 @@ public interface VideoMapper extends BaseMapper<Video> {
      *
      * <p>为什么需要它？
      * 点赞走的是"权威同步写 user_like + 派生态 video.like_count 异步刷回"。
-     * 在 MQ 接入之前（{@code NoopLikeCountPublisher} 什么都不做），
+     * 现状（RocketMQ 已接入，但默认关闭，见 {@code app.mq.enabled}）：
+     * 关闭时由 {@code SyncLikeCountPublisher} 在请求线程里同步算 Redis 计数，
+     * 但 {@code video.like_count} 这一列仍是异步刷回的 ——
      * 如果没有这个任务，video.like_count 就会<b>永远停在旧值</b>，
      * 导致热度排序（{@code selectHotExclude} 里用了 like_count）和展示数字都是错的。
      *
